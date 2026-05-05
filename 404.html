@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>ATTENDANCE.SYS</title>
+  <script>
+    // GitHub Pages 404 redirect — sends any unknown path back to index
+    const seg = location.pathname.split('/').filter(Boolean);
+    const base = '/' + (seg.length > 0 ? seg[0] + '/' : '');
+    sessionStorage.setItem('redirect', location.href);
+    location.replace(base);
+  </script>
+</head>
+<body></body>
+</html>

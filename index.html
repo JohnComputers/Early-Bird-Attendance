@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ATTENDANCE.SYS — Visual Attendance Tracker</title>
+  <meta name="description" content="Client-side facial-recognition attendance tracker. Mark chair positions from an empty-room photo, then auto-take attendance from a filled-room photo." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%230a0e0a'/%3E%3Crect x='8' y='8' width='48' height='48' fill='none' stroke='%23c8ff00' stroke-width='4'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23c8ff00'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+  <!-- ========= BOOT OVERLAY ========= -->
+  <div id="boot" class="boot">
+    <div class="boot-grid" aria-hidden="true"></div>
+    <div class="boot-content">
+      <div class="boot-row">
+        <span class="boot-mark"></span>
+        <span class="boot-brand">ATTENDANCE<span class="dim">.SYS</span></span>
+      </div>
+      <div class="boot-status" id="bootStatus">INITIALIZING DATABASE…</div>
+      <div class="boot-bar"><div id="bootProgress" class="boot-progress"></div></div>
+      <pre class="boot-log" id="bootLog"></pre>
+      <div class="boot-hint" id="bootHint">First load downloads ~6&nbsp;MB of vision models. They cache after this.</div>
+    </div>
+  </div>
+
+  <!-- ========= TOP BAR ========= -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">ATTENDANCE<span class="dim">.SYS</span></span>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist">
+      <button class="tab active" data-tab="setup" role="tab">01 / SETUP</button>
+      <button class="tab" data-tab="attendance" role="tab">02 / ATTEND</button>
+      <button class="tab" data-tab="people" role="tab">03 / PEOPLE</button>
+      <button class="tab" data-tab="reports" role="tab">04 / REPORTS</button>
+    </nav>
+    <div class="meta">
+      <span class="meta-pair"><span class="meta-k">PPL</span><span class="meta-v" id="metaPeople">0</span></span>
+      <span class="meta-pair"><span class="meta-k">SES</span><span class="meta-v" id="metaSessions">0</span></span>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- ============================================================
+         01 / SETUP
+    ============================================================= -->
+    <section id="setup" class="tab-content active">
+      <div class="panel">
+        <header class="panel-head">
+          <div>
+            <h2>01 / SETUP <span class="head-dim">— Define the Room</span></h2>
+            <p>Upload an <em>empty-room</em> photo, then click on each chair to mark seats. Click a marker again to remove it. Save when done.</p>
+          </div>
+          <div class="head-tools">
+            <label class="btn primary">
+              <input type="file" id="setupFile" accept="image/*" hidden />
+              <span>UPLOAD ROOM PHOTO</span>
+            </label>
+          </div>
+        </header>
+
+        <div class="setup-grid">
+          <div class="canvas-wrap" id="setupCanvasWrap">
+            <div class="canvas-empty" id="setupEmpty">
+              <div class="canvas-empty-mark"></div>
+              <h3>NO IMAGE LOADED</h3>
+              <p>Upload an empty room photo to begin marking seat positions.</p>
+            </div>
+            <canvas id="setupCanvas" class="hidden"></canvas>
+          </div>
+
+          <aside class="side">
+            <div class="card">
+              <div class="card-head"><h3>ROOM</h3></div>
+              <div class="card-body">
+                <label class="field">
+                  <span>Name this room</span>
+                  <input type="text" id="roomName" placeholder="Robotics Lab — Tuesdays" />
+                </label>
+                <div class="kv"><span>Seats marked</span><strong id="seatCount">0</strong></div>
+                <div class="kv"><span>Image dims</span><strong id="imgDims">—</strong></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3>TOOLS</h3></div>
+              <div class="card-body stack">
+                <button class="btn ghost" id="clearChairsBtn" disabled>
+                  <span>×</span> CLEAR ALL MARKERS
+                </button>
+                <button class="btn primary block" id="saveRoomBtn" disabled>SAVE ROOM LAYOUT</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3>SAVED ROOMS</h3></div>
+              <div class="card-body" id="roomsList">
+                <p class="muted">No rooms saved yet.</p>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         02 / ATTENDANCE
+    ============================================================= -->
+    <section id="attendance" class="tab-content">
+      <div class="panel">
+        <header class="panel-head">
+          <div>
+            <h2>02 / ATTEND <span class="head-dim">— Take Attendance</span></h2>
+            <p>Pick a room, upload a filled-room photo, identify any new faces, then save the session.</p>
+          </div>
+          <div class="head-tools">
+            <select id="attRoomSelect" class="select">
+              <option value="">— Select a room —</option>
+            </select>
+            <label class="btn primary" id="attUploadBtn">
+              <input type="file" id="attFile" accept="image/*" hidden />
+              <span>UPLOAD ATTENDANCE PHOTO</span>
+            </label>
+          </div>
+        </header>
+
+        <div class="att-grid">
+          <div class="canvas-wrap" id="attCanvasWrap">
+            <div class="canvas-empty" id="attEmpty">
+              <div class="canvas-empty-mark"></div>
+              <h3>READY</h3>
+              <p>Select a room and upload a photo of who's there.</p>
+            </div>
+            <canvas id="attCanvas" class="hidden"></canvas>
+          </div>
+
+          <aside class="side">
+            <div class="card">
+              <div class="card-head"><h3>RESULTS</h3></div>
+              <div class="card-body">
+                <div class="kv"><span>Faces detected</span><strong id="facesCount">—</strong></div>
+                <div class="kv"><span>Recognized</span><strong id="recCount">—</strong></div>
+                <div class="kv"><span>New / Unknown</span><strong id="unkCount">—</strong></div>
+                <div class="kv"><span>Seats filled</span><strong id="seatsFilled">—</strong></div>
+              </div>
+            </div>
+
+            <div class="card" id="attendeesCard" hidden>
+              <div class="card-head"><h3>WHO'S HERE</h3></div>
+              <div class="card-body" id="attendeesList"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><h3>ACTIONS</h3></div>
+              <div class="card-body stack">
+                <button class="btn primary block" id="saveSessionBtn" disabled>SAVE ATTENDANCE</button>
+                <button class="btn ghost block" id="discardSessionBtn" disabled>DISCARD</button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         03 / PEOPLE
+    ============================================================= -->
+    <section id="people" class="tab-content">
+      <div class="panel">
+        <header class="panel-head">
+          <div>
+            <h2>03 / PEOPLE <span class="head-dim">— Roster</span></h2>
+            <p>Everyone the system has learned. Faces are stored as 128-d descriptors plus a thumbnail.</p>
+          </div>
+          <div class="head-tools">
+            <input type="search" id="peopleSearch" class="select" placeholder="Search names…" />
+          </div>
+        </header>
+        <div id="peopleGrid" class="people-grid">
+          <div class="empty-block">
+            <h3>NO PEOPLE YET</h3>
+            <p>The roster fills automatically as you take attendance and identify new faces.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         04 / REPORTS
+    ============================================================= -->
+    <section id="reports" class="tab-content">
+      <div class="panel">
+        <header class="panel-head">
+          <div>
+            <h2>04 / REPORTS <span class="head-dim">— History &amp; Export</span></h2>
+            <p>Every saved attendance session. Export the full database as JSON or a flat CSV.</p>
+          </div>
+          <div class="head-tools">
+            <button class="btn ghost" id="exportJsonBtn">EXPORT JSON</button>
+            <button class="btn ghost" id="exportCsvBtn">EXPORT CSV</button>
+            <button class="btn danger" id="resetBtn">RESET ALL DATA</button>
+          </div>
+        </header>
+
+        <div class="reports-summary" id="reportsSummary"></div>
+
+        <div class="table-wrap">
+          <table class="table" id="sessionsTable">
+            <thead>
+              <tr>
+                <th>DATE</th>
+                <th>ROOM</th>
+                <th>PRESENT</th>
+                <th>SEATS</th>
+                <th>ATTENDEES</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="sessionsTbody">
+              <tr><td colspan="6" class="muted center">No sessions recorded yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="statusbar">
+    <span class="stat-dot" id="statusDot"></span>
+    <span id="statusText">Ready.</span>
+    <span class="spacer"></span>
+    <span id="statusModel">MODELS: idle</span>
+    <span class="meta-sep">·</span>
+    <span>local-only · no server · IndexedDB</span>
+  </footer>
+
+  <!-- ========= IDENTIFY MODAL ========= -->
+  <div id="identifyModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>IDENTIFY UNKNOWN FACES</h3>
+        <button class="modal-x" id="modalCloseBtn" aria-label="Close">×</button>
+      </div>
+      <p class="modal-sub">Match each unknown face to an existing person, or give them a new name. Skip to mark as anonymous.</p>
+      <div class="identify-list" id="identifyList"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="modalCancelBtn">CANCEL</button>
+        <button class="btn primary" id="modalConfirmBtn">CONFIRM</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========= SESSION DETAIL MODAL ========= -->
+  <div id="sessionModal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card wide">
+      <div class="modal-head">
+        <h3 id="sessionModalTitle">SESSION</h3>
+        <button class="modal-x" id="sessionModalClose" aria-label="Close">×</button>
+      </div>
+      <div class="session-detail" id="sessionDetail"></div>
+    </div>
+  </div>
+
+  <!-- ========= TOAST ========= -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- face-api.js (bundles its own TF backend) -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <!-- App scripts -->
+  <script src="db.js"></script>
+  <script src="ml.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
