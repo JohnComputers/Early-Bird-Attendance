@@ -49,7 +49,7 @@
   <main>
 
     <!-- ============================================================
-         01 / SETUP
+         01 / SETUP — Define chair positions
     ============================================================= -->
     <section id="setup" class="tab-content active">
       <div class="panel">
@@ -84,14 +84,24 @@
                   <span>Name this room</span>
                   <input type="text" id="roomName" placeholder="Robotics Lab — Tuesdays" />
                 </label>
-                <div class="kv"><span>Seats marked</span><strong id="seatCount">0</strong></div>
-                <div class="kv"><span>Image dims</span><strong id="imgDims">—</strong></div>
+                <div class="kv">
+                  <span>Seats marked</span>
+                  <strong id="seatCount">0</strong>
+                </div>
+                <div class="kv">
+                  <span>Image dims</span>
+                  <strong id="imgDims">—</strong>
+                </div>
               </div>
             </div>
 
             <div class="card">
               <div class="card-head"><h3>TOOLS</h3></div>
               <div class="card-body stack">
+                <button class="btn ghost" id="autoDetectBtn" disabled>
+                  <span>⚙</span> AUTO-DETECT CHAIRS
+                  <small>experimental</small>
+                </button>
                 <button class="btn ghost" id="clearChairsBtn" disabled>
                   <span>×</span> CLEAR ALL MARKERS
                 </button>
