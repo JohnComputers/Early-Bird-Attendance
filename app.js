@@ -1,6 +1,6 @@
 /* =========================================================
-   app.js — ATTENDANCE.SYS main controller
-   Wires UI ↔ DB ↔ ML.
+   app.js — ATTENDANCE.SYS main controller (Firebase backend)
+   Wires UI ↔ DB (Firestore + Storage) ↔ ML.
 ========================================================= */
 
 const App = (() => {
@@ -15,9 +15,10 @@ const App = (() => {
     // Setup
     setup: {
       image: null,         // HTMLImageElement
-      imageBlob: null,
-      chairs: [],          // [{ x, y }] in image-pixel coordinates
-      editingRoomId: null, // when editing existing room
+      imageBlob: null,     // new upload waiting to be saved
+      imageUrl: null,      // existing (when editing)
+      chairs: [],
+      editingRoomId: null,
     },
 
     // Attendance
@@ -26,10 +27,10 @@ const App = (() => {
       room: null,
       image: null,
       imageBlob: null,
-      faces: [],           // [{ box, descriptor, ... }] from ML
-      faceCrops: [],       // Blob per face
-      attendees: [],       // [{ faceIdx, personId, name, isNew, chairIdx }]
-      pending: false,      // results awaiting "Save"
+      faces: [],
+      faceCrops: [],
+      attendees: [],
+      pending: false,
     },
   };
 
@@ -37,77 +38,146 @@ const App = (() => {
   // BOOT
   // ---------------------------------------------------------------------------
   async function init() {
-    // hide unused experimental button
     document.getElementById('autoDetectBtn').style.display = 'none';
-
     bindGlobalEvents();
+    bindSignInEvents();
 
-    bootStatus('OPENING DATABASE…');
-    bootLog('> Opening IndexedDB…');
-    try { await DB.open(); }
-    catch (err) { return bootFail('IndexedDB unavailable. Browsing in private mode?'); }
-    bootLog('> Database ready.');
+    // Init Firebase + check auth
+    bootStatus('CONNECTING TO FIREBASE…');
+    try {
+      Auth.init();
+    } catch (err) {
+      return bootFail(err.message);
+    }
+    bootLog('> Firebase initialized.');
+    bootProgress(8);
+
+    bootStatus('CHECKING AUTH STATE…');
+    const user = await Auth.waitForFirstAuthState();
+    if (!user) {
+      showSignInScreen();
+      return;
+    }
+    afterSignedIn(user);
+  }
+
+  async function afterSignedIn(user) {
+    showLoadingScreen();
+    bootLog('> Signed in as ' + user.email);
     bootProgress(15);
+    updateUserBadge(user);
 
     bootStatus('LOADING VISION MODELS…');
     try {
       await ML.loadModels((msg, pct) => {
         bootStatus(msg.toUpperCase());
         bootLog('> ' + msg);
-        if (pct) bootProgress(15 + pct * 0.85);
+        if (pct) bootProgress(15 + pct * 0.7);
       });
     } catch (err) {
       return bootFail(err.message);
+    }
+    bootProgress(85);
+
+    bootStatus('LOADING DATA…');
+    try {
+      await refreshAll();
+    } catch (err) {
+      return bootFail('Could not load data: ' + err.message +
+        ' — check that your Firestore rules allow this user to read /users/{uid}.');
     }
     bootProgress(100);
     bootLog('> All systems online.');
 
     setTimeout(hideBoot, 450);
-
-    await refreshAll();
     setStatus('Ready.', 'ok');
     setModelStatus('MODELS: loaded');
+
+    // React to sign-out from any source
+    Auth.onChange(u => {
+      if (!u) location.reload();
+    });
+  }
+
+  function showSignInScreen() {
+    document.getElementById('bootLoading').classList.add('hidden');
+    document.getElementById('bootSignIn').classList.remove('hidden');
+    document.getElementById('boot').classList.remove('done');
+    document.getElementById('boot').style.display = '';
+    setStatus('Not signed in.', 'error');
+    setModelStatus('MODELS: idle');
+  }
+
+  function showLoadingScreen() {
+    document.getElementById('bootSignIn').classList.add('hidden');
+    document.getElementById('bootLoading').classList.remove('hidden');
+  }
+
+  function bindSignInEvents() {
+    document.getElementById('googleSignInBtn').addEventListener('click', async () => {
+      const errEl = document.getElementById('signInError');
+      errEl.classList.add('hidden');
+      try {
+        const u = await Auth.signInGoogle();
+        if (u) afterSignedIn(u);
+      } catch (err) {
+        errEl.textContent = err.message || 'Sign-in failed.';
+        errEl.classList.remove('hidden');
+      }
+    });
+    document.getElementById('signOutBtn').addEventListener('click', async () => {
+      if (!confirm('Sign out?')) return;
+      await Auth.signOut();
+      // onChange listener will reload
+    });
+  }
+
+  function updateUserBadge(user) {
+    const badge = document.getElementById('userBadge');
+    if (!user) { badge.hidden = true; return; }
+    badge.hidden = false;
+    document.getElementById('userEmail').textContent = user.email || user.displayName || '';
+    const avatar = document.getElementById('userAvatar');
+    if (user.photoURL) {
+      avatar.src = user.photoURL;
+      avatar.style.display = '';
+    } else {
+      avatar.style.display = 'none';
+    }
   }
 
   // ---------------------------------------------------------------------------
   // GLOBAL EVENTS
   // ---------------------------------------------------------------------------
   function bindGlobalEvents() {
-    // Tabs
     document.getElementById('tabs').addEventListener('click', e => {
       const t = e.target.closest('.tab');
       if (!t) return;
       switchTab(t.dataset.tab);
     });
 
-    // Setup
     document.getElementById('setupFile').addEventListener('change', onSetupFile);
     document.getElementById('setupCanvas').addEventListener('click', onSetupCanvasClick);
     document.getElementById('clearChairsBtn').addEventListener('click', clearChairs);
     document.getElementById('saveRoomBtn').addEventListener('click', saveRoom);
     document.getElementById('roomName').addEventListener('input', updateSaveBtn);
 
-    // Attendance
     document.getElementById('attRoomSelect').addEventListener('change', onAttRoomChange);
     document.getElementById('attFile').addEventListener('change', onAttFile);
     document.getElementById('saveSessionBtn').addEventListener('click', saveSession);
     document.getElementById('discardSessionBtn').addEventListener('click', discardSession);
 
-    // Modal
     document.getElementById('modalCloseBtn').addEventListener('click', closeIdentifyModal);
     document.getElementById('modalCancelBtn').addEventListener('click', closeIdentifyModal);
     document.getElementById('modalConfirmBtn').addEventListener('click', confirmIdentify);
     document.getElementById('sessionModalClose').addEventListener('click', closeSessionModal);
 
-    // Reports
     document.getElementById('exportJsonBtn').addEventListener('click', exportJson);
     document.getElementById('exportCsvBtn').addEventListener('click', exportCsv);
     document.getElementById('resetBtn').addEventListener('click', resetAll);
 
-    // People search
     document.getElementById('peopleSearch').addEventListener('input', renderPeople);
 
-    // Window resize → redraw active canvas
     window.addEventListener('resize', () => {
       if (state.setup.image) drawSetupCanvas();
       if (state.att.image)   drawAttCanvas();
@@ -155,6 +225,7 @@ const App = (() => {
       const img = await fileToImage(file);
       state.setup.image = img;
       state.setup.imageBlob = file;
+      state.setup.imageUrl = null;
       state.setup.chairs = [];
       state.setup.editingRoomId = null;
       document.getElementById('setupEmpty').classList.add('hidden');
@@ -182,13 +253,11 @@ const App = (() => {
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0);
 
-    // Markers
     const r = Math.max(18, Math.min(c.width, c.height) * 0.018);
     state.setup.chairs.forEach((ch, i) => drawSeatMarker(ctx, ch.x, ch.y, i + 1, r));
   }
 
   function fitCanvas(c) {
-    // Constrain canvas to wrap height
     const wrap = c.parentElement;
     const maxH = Math.min(window.innerHeight * 0.7, 800);
     const ratio = c.width / c.height;
@@ -204,7 +273,6 @@ const App = (() => {
 
   function drawSeatMarker(ctx, x, y, n, r) {
     ctx.save();
-    // outer ring
     ctx.lineWidth = Math.max(2, r * 0.18);
     ctx.strokeStyle = '#c8ff00';
     ctx.fillStyle = 'rgba(200, 255, 0, 0.2)';
@@ -212,14 +280,12 @@ const App = (() => {
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    // crosshair
     ctx.strokeStyle = '#0a0d0a';
     ctx.lineWidth = Math.max(1, r * 0.08);
     ctx.beginPath();
     ctx.moveTo(x - r * 0.4, y); ctx.lineTo(x + r * 0.4, y);
     ctx.moveTo(x, y - r * 0.4); ctx.lineTo(x, y + r * 0.4);
     ctx.stroke();
-    // number
     ctx.fillStyle = '#c8ff00';
     ctx.fillRect(x + r * 0.6, y - r, r * 1.4, r * 0.9);
     ctx.fillStyle = '#0a0d0a';
@@ -236,7 +302,6 @@ const App = (() => {
     const x = (e.clientX - rect.left) * (c.width  / rect.width);
     const y = (e.clientY - rect.top)  * (c.height / rect.height);
 
-    // remove if click is near existing marker
     const r = Math.max(28, Math.min(c.width, c.height) * 0.025);
     const hit = state.setup.chairs.findIndex(ch =>
       Math.hypot(ch.x - x, ch.y - y) < r);
@@ -275,36 +340,48 @@ const App = (() => {
     const name = document.getElementById('roomName').value.trim();
     if (!name || !state.setup.image || state.setup.chairs.length === 0) return;
 
-    const room = {
-      name,
-      imageBlob: state.setup.imageBlob,
-      chairs: state.setup.chairs.slice(),
-      imgWidth:  state.setup.image.naturalWidth,
-      imgHeight: state.setup.image.naturalHeight,
-      createdAt: new Date().toISOString(),
-    };
+    setStatus('Uploading…', 'busy');
+    const btn = document.getElementById('saveRoomBtn');
+    btn.disabled = true;
 
-    if (state.setup.editingRoomId) {
-      room.id = state.setup.editingRoomId;
-      await DB.updateRoom(room);
-      toast('Room updated.');
-    } else {
-      await DB.addRoom(room);
-      toast(`Room "${name}" saved.`);
+    try {
+      const room = {
+        name,
+        imageBlob: state.setup.imageBlob,    // null if unchanged during edit
+        imageUrl:  state.setup.imageUrl,     // preserved when editing without new upload
+        chairs: state.setup.chairs.slice(),
+        imgWidth:  state.setup.image.naturalWidth,
+        imgHeight: state.setup.image.naturalHeight,
+        createdAt: new Date().toISOString(),
+      };
+
+      if (state.setup.editingRoomId) {
+        room.id = state.setup.editingRoomId;
+        await DB.updateRoom(room);
+        toast('Room updated.');
+      } else {
+        await DB.addRoom(room);
+        toast(`Room "${name}" saved.`);
+      }
+
+      state.setup = { image: null, imageBlob: null, imageUrl: null, chairs: [], editingRoomId: null };
+      document.getElementById('roomName').value = '';
+      document.getElementById('setupCanvas').classList.add('hidden');
+      document.getElementById('setupEmpty').classList.remove('hidden');
+      document.getElementById('imgDims').textContent = '—';
+      updateSeatCount();
+      updateSaveBtn();
+      await refreshAll();
+      setStatus('Ready.', 'ok');
+    } catch (err) {
+      console.error(err);
+      toast('Save failed: ' + err.message, true);
+      setStatus('Save failed.', 'error');
+      btn.disabled = false;
     }
-
-    // reset setup
-    state.setup = { image: null, imageBlob: null, chairs: [], editingRoomId: null };
-    document.getElementById('roomName').value = '';
-    document.getElementById('setupCanvas').classList.add('hidden');
-    document.getElementById('setupEmpty').classList.remove('hidden');
-    document.getElementById('imgDims').textContent = '—';
-    updateSeatCount();
-    updateSaveBtn();
-    await refreshAll();
   }
 
-  async function renderRoomsList() {
+  function renderRoomsList() {
     const root = document.getElementById('roomsList');
     if (state.rooms.length === 0) {
       root.innerHTML = '<p class="muted">No rooms saved yet.</p>';
@@ -317,7 +394,7 @@ const App = (() => {
       div.innerHTML = `
         <div>
           <div class="room-item-name">${escapeHtml(r.name)}</div>
-          <div class="room-item-meta">${r.chairs.length} seats · ${formatDate(r.createdAt)}</div>
+          <div class="room-item-meta">${(r.chairs || []).length} seats · ${formatDate(r.createdAt)}</div>
         </div>
         <div>
           <button class="x" data-edit="${r.id}" title="Edit">✎</button>
@@ -332,21 +409,29 @@ const App = (() => {
   async function editRoom(id) {
     const r = await DB.getRoom(id);
     if (!r) return;
-    const img = await blobToImage(r.imageBlob);
-    state.setup = {
-      image: img,
-      imageBlob: r.imageBlob,
-      chairs: r.chairs.slice(),
-      editingRoomId: r.id,
-    };
-    document.getElementById('roomName').value = r.name;
-    document.getElementById('setupEmpty').classList.add('hidden');
-    document.getElementById('setupCanvas').classList.remove('hidden');
-    document.getElementById('imgDims').textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
-    drawSetupCanvas();
-    updateSeatCount();
-    updateSaveBtn();
-    switchTab('setup');
+    setStatus('Loading room…', 'busy');
+    try {
+      const img = await urlToImage(r.imageUrl);
+      state.setup = {
+        image: img,
+        imageBlob: null,           // only set if user re-uploads
+        imageUrl: r.imageUrl,
+        chairs: (r.chairs || []).slice(),
+        editingRoomId: r.id,
+      };
+      document.getElementById('roomName').value = r.name;
+      document.getElementById('setupEmpty').classList.add('hidden');
+      document.getElementById('setupCanvas').classList.remove('hidden');
+      document.getElementById('imgDims').textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
+      drawSetupCanvas();
+      updateSeatCount();
+      updateSaveBtn();
+      switchTab('setup');
+      setStatus('Editing room.', 'ok');
+    } catch (err) {
+      toast('Could not load room image: ' + err.message, true);
+      setStatus('Error.', 'error');
+    }
   }
 
   async function removeRoom(id) {
@@ -363,12 +448,12 @@ const App = (() => {
     const sel = document.getElementById('attRoomSelect');
     const cur = sel.value;
     sel.innerHTML = '<option value="">— Select a room —</option>' +
-      state.rooms.map(r => `<option value="${r.id}">${escapeHtml(r.name)} · ${r.chairs.length} seats</option>`).join('');
+      state.rooms.map(r => `<option value="${r.id}">${escapeHtml(r.name)} · ${(r.chairs || []).length} seats</option>`).join('');
     if (cur) sel.value = cur;
   }
 
   async function onAttRoomChange(e) {
-    const id = parseInt(e.target.value, 10);
+    const id = e.target.value;
     if (!id) { state.att.roomId = null; state.att.room = null; return; }
     state.att.roomId = id;
     state.att.room = await DB.getRoom(id);
@@ -394,29 +479,24 @@ const App = (() => {
       const c = document.getElementById('attCanvas');
       c.classList.remove('hidden');
 
-      // initial draw (image only)
       c.width = img.naturalWidth; c.height = img.naturalHeight;
       fitCanvas(c);
       c.getContext('2d').drawImage(img, 0, 0);
 
-      // detect
       const faces = await ML.detectFaces(img);
       state.att.faces = faces;
 
-      // crop face thumbnails
       state.att.faceCrops = await Promise.all(
         faces.map(f => ML.cropFace(img, f.box))
       );
 
-      // chair assignments
-      const chairAssignments = ML.assignFacesToChairs(faces, state.att.room.chairs);
+      const chairAssignments = ML.assignFacesToChairs(faces, state.att.room.chairs || []);
 
-      // match against roster
       const attendees = faces.map((f, i) => {
         const m = ML.matchFace(f.descriptor, state.people);
         return {
           faceIdx: i,
-          chairIdx: chairAssignments[i],   // index into room.chairs (or null)
+          chairIdx: chairAssignments[i],
           personId: m ? m.personId : null,
           name: m ? m.name : null,
           isNew: !m,
@@ -455,17 +535,15 @@ const App = (() => {
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0);
 
-    // chair markers (faded)
     const room = state.att.room;
     const r = Math.max(18, Math.min(c.width, c.height) * 0.018);
     if (room) {
       ctx.save();
       ctx.globalAlpha = 0.35;
-      room.chairs.forEach((ch, i) => drawSeatMarker(ctx, ch.x, ch.y, i + 1, r));
+      (room.chairs || []).forEach((ch, i) => drawSeatMarker(ctx, ch.x, ch.y, i + 1, r));
       ctx.restore();
     }
 
-    // face boxes
     state.att.attendees.forEach(att => {
       const face = state.att.faces[att.faceIdx];
       const { x, y, width, height } = face.box;
@@ -474,7 +552,6 @@ const App = (() => {
       ctx.strokeStyle = isUnk ? '#ffb547' : '#c8ff00';
       ctx.fillStyle   = isUnk ? '#ffb547' : '#c8ff00';
       ctx.strokeRect(x, y, width, height);
-      // label
       const label = att.name || (isUnk ? 'NEW?' : '?');
       const fontSize = Math.max(14, c.width * 0.018);
       ctx.font = `700 ${fontSize}px JetBrains Mono, monospace`;
@@ -492,7 +569,7 @@ const App = (() => {
     document.getElementById('facesCount').textContent = state.att.faces.length;
     document.getElementById('recCount').textContent   = a.filter(x => !x.isNew && x.personId).length;
     document.getElementById('unkCount').textContent   = a.filter(x => x.isNew).length;
-    const seats = state.att.room ? state.att.room.chairs.length : 0;
+    const seats = state.att.room ? (state.att.room.chairs || []).length : 0;
     const filled = a.filter(x => x.chairIdx !== null && x.chairIdx !== undefined).length;
     document.getElementById('seatsFilled').textContent = `${filled} / ${seats}`;
   }
@@ -555,55 +632,62 @@ const App = (() => {
 
   async function confirmIdentify() {
     const items = document.querySelectorAll('#identifyList .identify-item');
-    for (const item of items) {
-      const faceIdx = parseInt(item.dataset.faceIdx, 10);
-      const sel = item.querySelector('.existing-sel').value;
-      const newName = item.querySelector('.new-name').value.trim();
-      const att = state.att.attendees.find(a => a.faceIdx === faceIdx);
-      if (!att) continue;
+    setStatus('Saving identifications…', 'busy');
+    try {
+      for (const item of items) {
+        const faceIdx = parseInt(item.dataset.faceIdx, 10);
+        const sel = item.querySelector('.existing-sel').value;
+        const newName = item.querySelector('.new-name').value.trim();
+        const att = state.att.attendees.find(a => a.faceIdx === faceIdx);
+        if (!att) continue;
 
-      if (sel === '__skip' && !newName) {
-        att.name = 'Anonymous';
-        att.personId = null;
-        att.isNew = false;
-        continue;
-      }
-      if (sel && sel !== '__skip') {
-        // Match to existing person — add this descriptor as a new training sample.
-        // (encounters / lastSeen will be bumped when the session is saved.)
-        const personId = parseInt(sel, 10);
-        const person = state.people.find(p => p.id === personId);
-        if (person) {
-          person.descriptors = (person.descriptors || []).concat([state.att.faces[faceIdx].descriptor]);
-          await DB.updatePerson(person);
-          att.personId = person.id;
-          att.name = person.name;
+        if (sel === '__skip' && !newName) {
+          att.name = 'Anonymous';
+          att.personId = null;
+          att.isNew = false;
+          continue;
+        }
+        if (sel && sel !== '__skip') {
+          // Match to existing person — add this descriptor as a new training sample.
+          const personId = sel;
+          const person = state.people.find(p => p.id === personId);
+          if (person) {
+            person.descriptors = (person.descriptors || []).concat([state.att.faces[faceIdx].descriptor]);
+            await DB.updatePerson(person);
+            att.personId = person.id;
+            att.name = person.name;
+            att.isNew = false;
+          }
+          continue;
+        }
+        if (newName) {
+          const blob = state.att.faceCrops[faceIdx];
+          const desc = state.att.faces[faceIdx].descriptor;
+          const personId = await DB.addPerson({
+            name: newName,
+            descriptors: [desc],
+            thumbBlob: blob,
+            firstSeen: new Date().toISOString(),
+            lastSeen: new Date().toISOString(),
+            encounters: 0,
+          });
+          att.personId = personId;
+          att.name = newName;
           att.isNew = false;
         }
-        continue;
       }
-      if (newName) {
-        const blob = state.att.faceCrops[faceIdx];
-        const desc = state.att.faces[faceIdx].descriptor;
-        const personId = await DB.addPerson({
-          name: newName,
-          descriptors: [desc],
-          thumbBlob: blob,
-          firstSeen: new Date().toISOString(),
-          lastSeen: new Date().toISOString(),
-          encounters: 0,
-        });
-        att.personId = personId;
-        att.name = newName;
-        att.isNew = false;
-      }
+      closeIdentifyModal();
+      await refreshAll();
+      drawAttCanvas();
+      updateAttResults();
+      renderAttendeesList();
+      toast('Identifications saved.');
+      setStatus('Ready.', 'ok');
+    } catch (err) {
+      console.error(err);
+      toast('Save failed: ' + err.message, true);
+      setStatus('Error.', 'error');
     }
-    closeIdentifyModal();
-    await refreshAll();
-    drawAttCanvas();
-    updateAttResults();
-    renderAttendeesList();
-    toast('Identifications saved.');
   }
 
   function closeIdentifyModal() {
@@ -613,38 +697,50 @@ const App = (() => {
   async function saveSession() {
     if (!state.att.room || !state.att.imageBlob) return;
 
-    const session = {
-      roomId: state.att.roomId,
-      roomName: state.att.room.name,
-      date: new Date().toISOString(),
-      imageBlob: state.att.imageBlob,
-      attendees: state.att.attendees.map(a => ({
-        personId: a.personId,
-        name: a.name || 'Anonymous',
-        isAnonymous: !a.personId,
-        chairIdx: a.chairIdx,
-        box: state.att.faces[a.faceIdx].box,
-      })),
-      faceCount: state.att.faces.length,
-      seatCount: state.att.room.chairs.length,
-    };
-    await DB.addSession(session);
+    setStatus('Saving session…', 'busy');
+    const btn = document.getElementById('saveSessionBtn');
+    btn.disabled = true;
 
-    // bump people lastSeen
-    const presentIds = new Set(session.attendees.map(a => a.personId).filter(Boolean));
-    for (const pid of presentIds) {
-      const p = state.people.find(x => x.id === pid);
-      if (p) {
-        p.lastSeen = session.date;
-        p.encounters = (p.encounters || 0) + 1;
-        await DB.updatePerson(p);
+    try {
+      const session = {
+        roomId: state.att.roomId,
+        roomName: state.att.room.name,
+        date: new Date().toISOString(),
+        imageBlob: state.att.imageBlob,
+        attendees: state.att.attendees.map(a => ({
+          personId: a.personId,
+          name: a.name || 'Anonymous',
+          isAnonymous: !a.personId,
+          chairIdx: a.chairIdx,
+          box: state.att.faces[a.faceIdx].box,
+        })),
+        faceCount: state.att.faces.length,
+        seatCount: (state.att.room.chairs || []).length,
+      };
+      await DB.addSession(session);
+
+      // bump people lastSeen / encounters
+      const presentIds = new Set(session.attendees.map(a => a.personId).filter(Boolean));
+      for (const pid of presentIds) {
+        const p = state.people.find(x => x.id === pid);
+        if (p) {
+          p.lastSeen = session.date;
+          p.encounters = (p.encounters || 0) + 1;
+          await DB.updatePerson(p);
+        }
       }
-    }
 
-    discardSession();
-    await refreshAll();
-    toast('Attendance saved.');
-    switchTab('reports');
+      discardSession();
+      await refreshAll();
+      toast('Attendance saved.');
+      switchTab('reports');
+      setStatus('Ready.', 'ok');
+    } catch (err) {
+      console.error(err);
+      toast('Save failed: ' + err.message, true);
+      setStatus('Save failed.', 'error');
+      btn.disabled = false;
+    }
   }
 
   function discardSession() {
@@ -684,13 +780,13 @@ const App = (() => {
     filtered.forEach(p => {
       const card = document.createElement('div');
       card.className = 'person-card';
-      const url = p.thumbBlob ? URL.createObjectURL(p.thumbBlob) : '';
+      const url = p.thumbUrl || '';
       card.innerHTML = `
         <img class="person-thumb" src="${url}" alt="${escapeHtml(p.name)}"/>
         <div class="person-meta">
           <div class="person-name">${escapeHtml(p.name)}</div>
           <div class="person-stats">
-            ${p.encounters || 1}× SEEN · ${(p.descriptors || []).length} SAMPLES
+            ${p.encounters || 0}× SEEN · ${(p.descriptors || []).length} SAMPLES
           </div>
         </div>
         <div class="person-actions">
@@ -732,11 +828,11 @@ const App = (() => {
   // ===========================================================================
   function renderReports() {
     const sums = document.getElementById('reportsSummary');
-    const sessions = state.sessions.slice().sort((a, b) => b.date.localeCompare(a.date));
+    const sessions = state.sessions.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
     const totalFaces = sessions.reduce((s, x) => s + (x.faceCount || 0), 0);
     const uniqPeople = new Set();
-    sessions.forEach(s => s.attendees.forEach(a => a.personId && uniqPeople.add(a.personId)));
+    sessions.forEach(s => (s.attendees || []).forEach(a => a.personId && uniqPeople.add(a.personId)));
     const lastDate = sessions[0]?.date;
 
     sums.innerHTML = `
@@ -753,7 +849,7 @@ const App = (() => {
     tbody.innerHTML = '';
     sessions.forEach(s => {
       const tr = document.createElement('tr');
-      const pills = s.attendees.map(a =>
+      const pills = (s.attendees || []).map(a =>
         `<span class="att-pill ${a.isAnonymous ? 'unk' : ''}">${escapeHtml(a.name)}</span>`
       ).join('');
       tr.innerHTML = `
@@ -784,32 +880,41 @@ const App = (() => {
     document.getElementById('sessionModalTitle').textContent =
       `${s.roomName} · ${formatDate(s.date)}`;
     const root = document.getElementById('sessionDetail');
-    const url = URL.createObjectURL(s.imageBlob);
 
-    // build canvas with face boxes
-    const img = await blobToImage(s.imageBlob);
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    canvas.style.width = '100%';
-    canvas.style.height = 'auto';
-    canvas.style.borderRadius = '4px';
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
-    s.attendees.forEach(a => {
-      if (!a.box) return;
-      ctx.lineWidth = Math.max(2, canvas.width * 0.0025);
-      ctx.strokeStyle = a.isAnonymous ? '#ffb547' : '#c8ff00';
-      ctx.fillStyle   = a.isAnonymous ? '#ffb547' : '#c8ff00';
-      ctx.strokeRect(a.box.x, a.box.y, a.box.width, a.box.height);
-      const fontSize = Math.max(14, canvas.width * 0.018);
-      ctx.font = `700 ${fontSize}px JetBrains Mono, monospace`;
-      const tw = ctx.measureText(a.name).width + fontSize * 0.8;
-      ctx.fillRect(a.box.x, a.box.y - fontSize * 1.4, tw, fontSize * 1.4);
-      ctx.fillStyle = '#0a0d0a';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(a.name, a.box.x + fontSize * 0.4, a.box.y - fontSize * 0.7);
-    });
+    let canvas;
+    try {
+      const img = await urlToImage(s.imageUrl);
+      canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.style.width = '100%';
+      canvas.style.height = 'auto';
+      canvas.style.borderRadius = '4px';
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      (s.attendees || []).forEach(a => {
+        if (!a.box) return;
+        ctx.lineWidth = Math.max(2, canvas.width * 0.0025);
+        ctx.strokeStyle = a.isAnonymous ? '#ffb547' : '#c8ff00';
+        ctx.fillStyle   = a.isAnonymous ? '#ffb547' : '#c8ff00';
+        ctx.strokeRect(a.box.x, a.box.y, a.box.width, a.box.height);
+        const fontSize = Math.max(14, canvas.width * 0.018);
+        ctx.font = `700 ${fontSize}px JetBrains Mono, monospace`;
+        const tw = ctx.measureText(a.name).width + fontSize * 0.8;
+        ctx.fillRect(a.box.x, a.box.y - fontSize * 1.4, tw, fontSize * 1.4);
+        ctx.fillStyle = '#0a0d0a';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(a.name, a.box.x + fontSize * 0.4, a.box.y - fontSize * 0.7);
+      });
+    } catch (err) {
+      canvas = document.createElement('div');
+      canvas.style.padding = '24px';
+      canvas.style.background = 'var(--bg-3)';
+      canvas.style.borderRadius = '4px';
+      canvas.style.color = 'var(--text-dim)';
+      canvas.style.textAlign = 'center';
+      canvas.textContent = 'Image unavailable.';
+    }
 
     root.innerHTML = '';
     const left = document.createElement('div');
@@ -823,7 +928,7 @@ const App = (() => {
       <div class="kv"><span>Present</span><strong>${s.faceCount} / ${s.seatCount}</strong></div>
       <h3 style="margin: 18px 0 10px;">ATTENDEES</h3>
       <div class="attendees">
-        ${s.attendees.map(a => `
+        ${(s.attendees || []).map(a => `
           <div class="attendee${a.isAnonymous ? ' unk' : ''}">
             <div class="info">
               <b>${escapeHtml(a.name)}</b>
@@ -859,7 +964,7 @@ const App = (() => {
   async function exportCsv() {
     const rows = [['session_id', 'date', 'room', 'person_id', 'person_name', 'is_anonymous', 'seat']];
     for (const s of state.sessions) {
-      for (const a of s.attendees) {
+      for (const a of (s.attendees || [])) {
         rows.push([
           s.id, s.date, s.roomName,
           a.personId || '',
@@ -880,14 +985,21 @@ const App = (() => {
   }
 
   async function resetAll() {
-    const text = prompt('Type RESET to wipe all rooms, people, and sessions. This cannot be undone.');
+    const text = prompt('Type RESET to wipe all rooms, people, and sessions in your Firebase project. This cannot be undone.');
     if (text !== 'RESET') return;
-    await DB.reset();
-    await refreshAll();
-    renderReports();
-    renderPeople();
-    discardSession();
-    toast('All data wiped.');
+    setStatus('Wiping data…', 'busy');
+    try {
+      await DB.reset();
+      await refreshAll();
+      renderReports();
+      renderPeople();
+      discardSession();
+      toast('All data wiped.');
+      setStatus('Ready.', 'ok');
+    } catch (err) {
+      toast('Reset failed: ' + err.message, true);
+      setStatus('Error.', 'error');
+    }
   }
 
   // ===========================================================================
@@ -903,12 +1015,13 @@ const App = (() => {
     });
   }
 
-  function blobToImage(blob) {
+  function urlToImage(url) {
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(blob);
+      if (!url) return reject(new Error('No image URL'));
       const img = new Image();
+      img.crossOrigin = 'anonymous';     // needed to safely draw to canvas
       img.onload = () => resolve(img);
-      img.onerror = () => reject(new Error('Could not decode image'));
+      img.onerror = () => reject(new Error('Could not load image from URL'));
       img.src = url;
     });
   }
@@ -929,6 +1042,7 @@ const App = (() => {
   }
 
   function formatDate(iso) {
+    if (!iso) return '—';
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
     return d.toLocaleString(undefined, {
@@ -974,12 +1088,13 @@ const App = (() => {
     setTimeout(() => b.style.display = 'none', 600);
   }
   function bootFail(msg) {
+    showLoadingScreen();
     bootStatus('BOOT ERROR');
     bootLog('> ERROR: ' + msg);
     setStatus('Boot failed — ' + msg, 'error');
     setModelStatus('MODELS: error');
     document.getElementById('bootHint').textContent =
-      'Reload to retry. If this persists, check your network or browser console.';
+      'Reload to retry. If this persists, check firebase-config.js, your Firestore/Storage rules, and your auth provider settings.';
   }
 
   return { init };
