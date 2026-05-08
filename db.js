@@ -6,6 +6,7 @@
 const DB = (() => {
   const NAME = 'attendance_sys';
   const VERSION = 1;
+
   let dbInstance = null;
 
   function open() {
@@ -29,68 +30,128 @@ const DB = (() => {
         }
       };
       req.onsuccess = () => { dbInstance = req.result; resolve(dbInstance); };
-      req.onerror  = () => reject(req.error);
+      req.onerror = () => reject(req.error);
     });
   }
 
   function tx(store, mode = 'readonly') {
     return open().then(db => db.transaction(store, mode).objectStore(store));
   }
+
   function reqP(req) {
     return new Promise((resolve, reject) => {
       req.onsuccess = () => resolve(req.result);
-      req.onerror   = () => reject(req.error);
+      req.onerror = () => reject(req.error);
     });
   }
 
-  // ROOMS
-  async function addRoom(room)       { const s = await tx('rooms','readwrite'); return reqP(s.add(room)); }
-  async function getRooms()          { const s = await tx('rooms');             return reqP(s.getAll()); }
-  async function getRoom(id)         { const s = await tx('rooms');             return reqP(s.get(id)); }
-  async function deleteRoom(id)      { const s = await tx('rooms','readwrite'); return reqP(s.delete(id)); }
-  async function updateRoom(room)    { const s = await tx('rooms','readwrite'); return reqP(s.put(room)); }
+  // ---------- ROOMS ----------
+  async function addRoom(room) {
+    const s = await tx('rooms', 'readwrite');
+    const id = await reqP(s.add(room));
+    return id;
+  }
+  async function getRooms() {
+    const s = await tx('rooms');
+    return reqP(s.getAll());
+  }
+  async function getRoom(id) {
+    const s = await tx('rooms');
+    return reqP(s.get(id));
+  }
+  async function deleteRoom(id) {
+    const s = await tx('rooms', 'readwrite');
+    return reqP(s.delete(id));
+  }
+  async function updateRoom(room) {
+    const s = await tx('rooms', 'readwrite');
+    return reqP(s.put(room));
+  }
 
-  // PEOPLE
-  async function addPerson(person)   { const s = await tx('people','readwrite'); return reqP(s.add(person)); }
-  async function getPeople()         { const s = await tx('people');             return reqP(s.getAll()); }
-  async function getPerson(id)       { const s = await tx('people');             return reqP(s.get(id)); }
-  async function updatePerson(p)     { const s = await tx('people','readwrite'); return reqP(s.put(p)); }
-  async function deletePerson(id)    { const s = await tx('people','readwrite'); return reqP(s.delete(id)); }
+  // ---------- PEOPLE ----------
+  async function addPerson(person) {
+    const s = await tx('people', 'readwrite');
+    return reqP(s.add(person));
+  }
+  async function getPeople() {
+    const s = await tx('people');
+    return reqP(s.getAll());
+  }
+  async function getPerson(id) {
+    const s = await tx('people');
+    return reqP(s.get(id));
+  }
+  async function updatePerson(person) {
+    const s = await tx('people', 'readwrite');
+    return reqP(s.put(person));
+  }
+  async function deletePerson(id) {
+    const s = await tx('people', 'readwrite');
+    return reqP(s.delete(id));
+  }
 
-  // SESSIONS
-  async function addSession(session) { const s = await tx('sessions','readwrite'); return reqP(s.add(session)); }
-  async function getSessions()       { const s = await tx('sessions');             return reqP(s.getAll()); }
-  async function getSession(id)      { const s = await tx('sessions');             return reqP(s.get(id)); }
-  async function deleteSession(id)   { const s = await tx('sessions','readwrite'); return reqP(s.delete(id)); }
+  // ---------- SESSIONS ----------
+  async function addSession(session) {
+    const s = await tx('sessions', 'readwrite');
+    return reqP(s.add(session));
+  }
+  async function getSessions() {
+    const s = await tx('sessions');
+    return reqP(s.getAll());
+  }
+  async function getSession(id) {
+    const s = await tx('sessions');
+    return reqP(s.get(id));
+  }
+  async function deleteSession(id) {
+    const s = await tx('sessions', 'readwrite');
+    return reqP(s.delete(id));
+  }
 
-  // COUNTS
+  // ---------- COUNTS ----------
   async function counts() {
     const [rooms, people, sessions] = await Promise.all([
-      tx('rooms').then(s   => reqP(s.count())),
-      tx('people').then(s  => reqP(s.count())),
+      tx('rooms').then(s => reqP(s.count())),
+      tx('people').then(s => reqP(s.count())),
       tx('sessions').then(s => reqP(s.count())),
     ]);
     return { rooms, people, sessions };
   }
 
-  // EXPORT / RESET
+  // ---------- EXPORT / RESET ----------
   async function exportAll() {
-    const [rooms, people, sessions] = await Promise.all([getRooms(), getPeople(), getSessions()]);
-    const toB64 = blob => blob ? blobToB64(blob) : null;
-    const roomsExp = await Promise.all(rooms.map(async r => ({ ...r, imageBlob: await toB64(r.imageBlob) })));
+    const [rooms, people, sessions] = await Promise.all([
+      getRooms(), getPeople(), getSessions(),
+    ]);
+
+    // Convert blobs to base64 for portability
+    const roomsExp = await Promise.all(rooms.map(async r => ({
+      ...r,
+      imageBlob: r.imageBlob ? await blobToB64(r.imageBlob) : null,
+    })));
     const peopleExp = await Promise.all(people.map(async p => ({
       ...p,
-      thumbBlob: await toB64(p.thumbBlob),
+      thumbBlob: p.thumbBlob ? await blobToB64(p.thumbBlob) : null,
       descriptors: (p.descriptors || []).map(d => Array.from(d)),
     })));
-    const sessionsExp = await Promise.all(sessions.map(async s => ({ ...s, imageBlob: await toB64(s.imageBlob) })));
-    return { version: 1, exportedAt: new Date().toISOString(), rooms: roomsExp, people: peopleExp, sessions: sessionsExp };
+    const sessionsExp = await Promise.all(sessions.map(async se => ({
+      ...se,
+      imageBlob: se.imageBlob ? await blobToB64(se.imageBlob) : null,
+    })));
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      rooms: roomsExp,
+      people: peopleExp,
+      sessions: sessionsExp,
+    };
   }
 
   async function reset() {
     const db = await open();
-    return new Promise((resolve, reject) => {
-      const t = db.transaction(['rooms','people','sessions'], 'readwrite');
+    await new Promise((resolve, reject) => {
+      const t = db.transaction(['rooms', 'people', 'sessions'], 'readwrite');
       t.objectStore('rooms').clear();
       t.objectStore('people').clear();
       t.objectStore('sessions').clear();
@@ -99,10 +160,11 @@ const DB = (() => {
     });
   }
 
+  // ---------- UTILS ----------
   function blobToB64(blob) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader();
-      fr.onload  = () => resolve(fr.result);
+      fr.onload = () => resolve(fr.result);
       fr.onerror = () => reject(fr.error);
       fr.readAsDataURL(blob);
     });
