@@ -1,178 +1,247 @@
-/* =========================================================
-   db.js — IndexedDB wrapper for ATTENDANCE.SYS
-   Stores: rooms, people, sessions
-========================================================= */
+/* ============================================================
+   db.js — Firebase Firestore + Storage backend
+   ------------------------------------------------------------
+   Layout (all per-user, isolated by security rules):
+     users/{uid}/rooms/{roomId}        → name, chairs, imageUrl, ...
+     users/{uid}/people/{personId}     → name, descriptors, thumbUrl, ...
+     users/{uid}/sessions/{sessionId}  → roomId, date, attendees, imageUrl, ...
+   Storage:
+     users/{uid}/rooms/{roomId}.jpg
+     users/{uid}/people/{personId}.jpg
+     users/{uid}/sessions/{sessionId}.jpg
+   ------------------------------------------------------------
+   Public API matches the original IndexedDB version. The only change
+   for the app: read-side image fields are URLs ("imageUrl", "thumbUrl")
+   instead of Blobs.
+============================================================ */
 
 const DB = (() => {
-  const NAME = 'attendance_sys';
-  const VERSION = 1;
 
-  let dbInstance = null;
+  // -------- helpers --------
+  const fs = () => firebase.firestore();
+  const st = () => firebase.storage();
 
-  function open() {
-    if (dbInstance) return Promise.resolve(dbInstance);
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(NAME, VERSION);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('rooms')) {
-          const s = db.createObjectStore('rooms', { keyPath: 'id', autoIncrement: true });
-          s.createIndex('createdAt', 'createdAt');
-        }
-        if (!db.objectStoreNames.contains('people')) {
-          const s = db.createObjectStore('people', { keyPath: 'id', autoIncrement: true });
-          s.createIndex('name', 'name');
-        }
-        if (!db.objectStoreNames.contains('sessions')) {
-          const s = db.createObjectStore('sessions', { keyPath: 'id', autoIncrement: true });
-          s.createIndex('date', 'date');
-          s.createIndex('roomId', 'roomId');
-        }
-      };
-      req.onsuccess = () => { dbInstance = req.result; resolve(dbInstance); };
-      req.onerror = () => reject(req.error);
-    });
+  function uid() { return Auth.requireUid(); }
+  function col(name) { return fs().collection(`users/${uid()}/${name}`); }
+  function docRef(coll, id) { return fs().doc(`users/${uid()}/${coll}/${id}`); }
+  function storageRef(path) { return st().ref(`users/${uid()}/${path}`); }
+
+  // Firestore disallows directly nested arrays; wrap each Float32Array as { v: [...] }.
+  function descToWire(d) {
+    return { v: d instanceof Float32Array ? Array.from(d) : Array.from(d || []) };
+  }
+  function wireToDesc(o) {
+    return new Float32Array(o.v || []);
   }
 
-  function tx(store, mode = 'readonly') {
-    return open().then(db => db.transaction(store, mode).objectStore(store));
+  async function uploadBlob(path, blob, contentType = 'image/jpeg') {
+    const ref = storageRef(path);
+    await ref.put(blob, { contentType });
+    return ref.getDownloadURL();
+  }
+  async function deleteFile(path) {
+    try { await storageRef(path).delete(); }
+    catch (err) { /* not-found is fine */ }
   }
 
-  function reqP(req) {
-    return new Promise((resolve, reject) => {
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
+  // No-op kept so app.js can `await DB.open()` exactly as before.
+  function open() { return Promise.resolve(); }
 
-  // ---------- ROOMS ----------
+  // -------- ROOMS --------
   async function addRoom(room) {
-    const s = await tx('rooms', 'readwrite');
-    const id = await reqP(s.add(room));
+    const ref = col('rooms').doc();          // auto-id
+    const id = ref.id;
+    let imageUrl = room.imageUrl || null;
+    if (room.imageBlob) {
+      imageUrl = await uploadBlob(`rooms/${id}.jpg`, room.imageBlob);
+    }
+    await ref.set({
+      name: room.name,
+      chairs: room.chairs || [],
+      imgWidth: room.imgWidth,
+      imgHeight: room.imgHeight,
+      imageUrl,
+      createdAt: room.createdAt || new Date().toISOString(),
+    });
     return id;
   }
+
   async function getRooms() {
-    const s = await tx('rooms');
-    return reqP(s.getAll());
+    const snap = await col('rooms').orderBy('createdAt', 'desc').get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   }
+
   async function getRoom(id) {
-    const s = await tx('rooms');
-    return reqP(s.get(id));
+    const snap = await docRef('rooms', id).get();
+    return snap.exists ? { id: snap.id, ...snap.data() } : null;
   }
-  async function deleteRoom(id) {
-    const s = await tx('rooms', 'readwrite');
-    return reqP(s.delete(id));
-  }
+
   async function updateRoom(room) {
-    const s = await tx('rooms', 'readwrite');
-    return reqP(s.put(room));
+    const ref = docRef('rooms', room.id);
+    let imageUrl = room.imageUrl || null;
+    if (room.imageBlob) {
+      imageUrl = await uploadBlob(`rooms/${room.id}.jpg`, room.imageBlob);
+    }
+    await ref.set({
+      name: room.name,
+      chairs: room.chairs || [],
+      imgWidth: room.imgWidth,
+      imgHeight: room.imgHeight,
+      imageUrl,
+      createdAt: room.createdAt || new Date().toISOString(),
+    });
   }
 
-  // ---------- PEOPLE ----------
+  async function deleteRoom(id) {
+    await deleteFile(`rooms/${id}.jpg`);
+    await docRef('rooms', id).delete();
+  }
+
+  // -------- PEOPLE --------
   async function addPerson(person) {
-    const s = await tx('people', 'readwrite');
-    return reqP(s.add(person));
+    const ref = col('people').doc();
+    const id = ref.id;
+    let thumbUrl = person.thumbUrl || null;
+    if (person.thumbBlob) {
+      thumbUrl = await uploadBlob(`people/${id}.jpg`, person.thumbBlob);
+    }
+    await ref.set({
+      name: person.name,
+      descriptors: (person.descriptors || []).map(descToWire),
+      thumbUrl,
+      firstSeen: person.firstSeen || new Date().toISOString(),
+      lastSeen:  person.lastSeen  || new Date().toISOString(),
+      encounters: person.encounters || 0,
+    });
+    return id;
   }
+
   async function getPeople() {
-    const s = await tx('people');
-    return reqP(s.getAll());
+    const snap = await col('people').get();
+    return snap.docs.map(d => {
+      const data = d.data();
+      return {
+        id: d.id,
+        ...data,
+        descriptors: (data.descriptors || []).map(wireToDesc),
+      };
+    });
   }
+
   async function getPerson(id) {
-    const s = await tx('people');
-    return reqP(s.get(id));
+    const snap = await docRef('people', id).get();
+    if (!snap.exists) return null;
+    const data = snap.data();
+    return { id: snap.id, ...data, descriptors: (data.descriptors || []).map(wireToDesc) };
   }
+
   async function updatePerson(person) {
-    const s = await tx('people', 'readwrite');
-    return reqP(s.put(person));
+    const ref = docRef('people', person.id);
+    const update = {
+      name: person.name,
+      descriptors: (person.descriptors || []).map(descToWire),
+      lastSeen: person.lastSeen || new Date().toISOString(),
+      encounters: person.encounters || 0,
+    };
+    if (person.thumbBlob) {
+      update.thumbUrl = await uploadBlob(`people/${person.id}.jpg`, person.thumbBlob);
+    }
+    await ref.update(update);
   }
+
   async function deletePerson(id) {
-    const s = await tx('people', 'readwrite');
-    return reqP(s.delete(id));
+    await deleteFile(`people/${id}.jpg`);
+    await docRef('people', id).delete();
   }
 
-  // ---------- SESSIONS ----------
+  // -------- SESSIONS --------
   async function addSession(session) {
-    const s = await tx('sessions', 'readwrite');
-    return reqP(s.add(session));
+    const ref = col('sessions').doc();
+    const id = ref.id;
+    let imageUrl = null;
+    if (session.imageBlob) {
+      imageUrl = await uploadBlob(`sessions/${id}.jpg`, session.imageBlob);
+    }
+    await ref.set({
+      roomId:    session.roomId,
+      roomName:  session.roomName,
+      date:      session.date || new Date().toISOString(),
+      imageUrl,
+      attendees: session.attendees || [],
+      faceCount: session.faceCount || 0,
+      seatCount: session.seatCount || 0,
+    });
+    return id;
   }
+
   async function getSessions() {
-    const s = await tx('sessions');
-    return reqP(s.getAll());
+    const snap = await col('sessions').orderBy('date', 'desc').get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   }
+
   async function getSession(id) {
-    const s = await tx('sessions');
-    return reqP(s.get(id));
+    const snap = await docRef('sessions', id).get();
+    return snap.exists ? { id: snap.id, ...snap.data() } : null;
   }
+
   async function deleteSession(id) {
-    const s = await tx('sessions', 'readwrite');
-    return reqP(s.delete(id));
+    await deleteFile(`sessions/${id}.jpg`);
+    await docRef('sessions', id).delete();
   }
 
-  // ---------- COUNTS ----------
+  // -------- COUNTS --------
   async function counts() {
-    const [rooms, people, sessions] = await Promise.all([
-      tx('rooms').then(s => reqP(s.count())),
-      tx('people').then(s => reqP(s.count())),
-      tx('sessions').then(s => reqP(s.count())),
+    const [r, p, s] = await Promise.all([
+      col('rooms').get(), col('people').get(), col('sessions').get(),
     ]);
-    return { rooms, people, sessions };
+    return { rooms: r.size, people: p.size, sessions: s.size };
   }
 
-  // ---------- EXPORT / RESET ----------
+  // -------- EXPORT --------
   async function exportAll() {
     const [rooms, people, sessions] = await Promise.all([
       getRooms(), getPeople(), getSessions(),
     ]);
-
-    // Convert blobs to base64 for portability
-    const roomsExp = await Promise.all(rooms.map(async r => ({
-      ...r,
-      imageBlob: r.imageBlob ? await blobToB64(r.imageBlob) : null,
-    })));
-    const peopleExp = await Promise.all(people.map(async p => ({
-      ...p,
-      thumbBlob: p.thumbBlob ? await blobToB64(p.thumbBlob) : null,
-      descriptors: (p.descriptors || []).map(d => Array.from(d)),
-    })));
-    const sessionsExp = await Promise.all(sessions.map(async se => ({
-      ...se,
-      imageBlob: se.imageBlob ? await blobToB64(se.imageBlob) : null,
-    })));
-
     return {
-      version: 1,
+      version: 2,
+      backend: 'firebase',
       exportedAt: new Date().toISOString(),
-      rooms: roomsExp,
-      people: peopleExp,
-      sessions: sessionsExp,
+      uid: uid(),
+      rooms,
+      // descriptors → plain arrays for portability
+      people: people.map(p => ({
+        ...p,
+        descriptors: (p.descriptors || []).map(d => Array.from(d)),
+      })),
+      sessions,
     };
   }
 
+  // -------- RESET --------
   async function reset() {
-    const db = await open();
-    await new Promise((resolve, reject) => {
-      const t = db.transaction(['rooms', 'people', 'sessions'], 'readwrite');
-      t.objectStore('rooms').clear();
-      t.objectStore('people').clear();
-      t.objectStore('sessions').clear();
-      t.oncomplete = resolve;
-      t.onerror = () => reject(t.error);
-    });
-  }
-
-  // ---------- UTILS ----------
-  function blobToB64(blob) {
-    return new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(fr.result);
-      fr.onerror = () => reject(fr.error);
-      fr.readAsDataURL(blob);
-    });
+    // Delete all docs (in batches so we don't hit transaction limits on big datasets)
+    for (const name of ['rooms', 'people', 'sessions']) {
+      const snap = await col(name).get();
+      const docs = snap.docs;
+      while (docs.length) {
+        const chunk = docs.splice(0, 400);
+        const batch = fs().batch();
+        chunk.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
+    }
+    // Delete all storage files for this user
+    for (const folder of ['rooms', 'people', 'sessions']) {
+      try {
+        const list = await storageRef(folder).listAll();
+        await Promise.all(list.items.map(item => item.delete().catch(() => {})));
+      } catch { /* no folder yet, fine */ }
+    }
   }
 
   return {
     open, counts, reset, exportAll,
-    addRoom, getRooms, getRoom, deleteRoom, updateRoom,
+    addRoom, getRooms, getRoom, updateRoom, deleteRoom,
     addPerson, getPeople, getPerson, updatePerson, deletePerson,
     addSession, getSessions, getSession, deleteSession,
   };
