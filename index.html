@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ATTENDANCE.SYS — Visual Attendance Tracker</title>
-  <meta name="description" content="Client-side facial-recognition attendance tracker. Mark chair positions from an empty-room photo, then auto-take attendance from a filled-room photo." />
+  <meta name="description" content="Client-side facial-recognition attendance tracker backed by Firebase. Mark chair positions, then auto-take attendance from a photo." />
   <link rel="stylesheet" href="style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,15 +16,43 @@
   <!-- ========= BOOT OVERLAY ========= -->
   <div id="boot" class="boot">
     <div class="boot-grid" aria-hidden="true"></div>
-    <div class="boot-content">
+
+    <!-- Loading mode -->
+    <div class="boot-content" id="bootLoading">
       <div class="boot-row">
         <span class="boot-mark"></span>
         <span class="boot-brand">ATTENDANCE<span class="dim">.SYS</span></span>
       </div>
-      <div class="boot-status" id="bootStatus">INITIALIZING DATABASE…</div>
+      <div class="boot-status" id="bootStatus">INITIALIZING…</div>
       <div class="boot-bar"><div id="bootProgress" class="boot-progress"></div></div>
       <pre class="boot-log" id="bootLog"></pre>
       <div class="boot-hint" id="bootHint">First load downloads ~6&nbsp;MB of vision models. They cache after this.</div>
+    </div>
+
+    <!-- Sign-in mode -->
+    <div class="boot-content boot-signin hidden" id="bootSignIn">
+      <div class="boot-row">
+        <span class="boot-mark"></span>
+        <span class="boot-brand">ATTENDANCE<span class="dim">.SYS</span></span>
+      </div>
+      <h2 class="signin-title">SIGN&nbsp;IN</h2>
+      <p class="signin-msg">
+        Your data syncs to your private Firebase project under your Google account.
+        Only you can read or write it. Sign in on any device to access the same roster.
+      </p>
+      <button id="googleSignInBtn" class="btn primary block signin-btn">
+        <svg viewBox="0 0 48 48" width="16" height="16" aria-hidden="true">
+          <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/>
+          <path fill="#FF3D00" d="m6.306 14.691 6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"/>
+          <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/>
+          <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/>
+        </svg>
+        CONTINUE&nbsp;WITH&nbsp;GOOGLE
+      </button>
+      <div id="signInError" class="signin-error hidden"></div>
+      <div class="boot-hint">
+        Backend: Firebase Firestore + Storage · Recognition runs locally in your browser
+      </div>
     </div>
   </div>
 
@@ -43,6 +71,11 @@
     <div class="meta">
       <span class="meta-pair"><span class="meta-k">PPL</span><span class="meta-v" id="metaPeople">0</span></span>
       <span class="meta-pair"><span class="meta-k">SES</span><span class="meta-v" id="metaSessions">0</span></span>
+      <span class="user-badge" id="userBadge" hidden>
+        <img id="userAvatar" alt="" />
+        <span class="user-email" id="userEmail"></span>
+        <button id="signOutBtn" title="Sign out">×</button>
+      </span>
     </div>
   </header>
 
@@ -249,7 +282,7 @@
     <span class="spacer"></span>
     <span id="statusModel">MODELS: idle</span>
     <span class="meta-sep">·</span>
-    <span>local-only · no server · IndexedDB</span>
+    <span>Firebase backend · recognition runs locally</span>
   </footer>
 
   <!-- ========= IDENTIFY MODAL ========= -->
@@ -282,10 +315,18 @@
   <!-- ========= TOAST ========= -->
   <div id="toast" class="toast hidden"></div>
 
+  <!-- Firebase compat SDKs (work with regular script tags) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js"></script>
+
   <!-- face-api.js (bundles its own TF backend) -->
   <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 
-  <!-- App scripts -->
+  <!-- App scripts (order matters: config → auth → db → ml → app) -->
+  <script src="firebase-config.js"></script>
+  <script src="auth.js"></script>
   <script src="db.js"></script>
   <script src="ml.js"></script>
   <script src="app.js"></script>
