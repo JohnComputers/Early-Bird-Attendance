@@ -1,66 +1,80 @@
 # ATTENDANCE.SYS
 
-A fully client-side visual attendance tracker with face recognition. No server required — runs entirely in the browser. Designed for GitHub Pages hosting.
+A fully **client-side** facial-recognition attendance tracker. Mark seat positions from an empty-room photo, then take attendance from a filled-room photo. Everything runs in the browser — no server, no API keys, no data leaves your device.
+
+Built for GitHub Pages.
+
+---
 
 ## Features
 
-- **Room Setup** — Upload an empty-room photo and click to place numbered seat markers
-- **Face Detection** — Upload a filled-room photo; faces are auto-detected and matched to seats
-- **Face Recognition** — 128-d descriptor matching via face-api.js; learns everyone over time
-- **New Person Flow** — Unknown faces trigger an identify modal to name or link them
-- **Persistent Database** — All data (faces, rooms, sessions) stored in IndexedDB on-device
-- **Reports** — Full session history with photo, attendee list, and seat assignments
-- **Export** — Download everything as JSON or CSV; reset button to wipe all data
+- **Setup** — Upload a photo of an empty room, click on each chair to mark seat positions. Save the layout under a name. Multiple rooms supported.
+- **Attendance** — Upload a filled-room photo. Faces are detected, matched against your roster, and assigned to the nearest chair. Unknown faces prompt you to identify them (pick existing person or new name).
+- **People** — Roster of everyone the system has learned. Each person stores multiple face samples for better recognition over time.
+- **Reports** — Full session history with date, room, attendance count, and who was there. Export to JSON or CSV. Reset the entire database with a typed confirmation.
+- **Persistence** — Everything stored in IndexedDB (rooms, people, sessions including the original photos). Survives page reloads.
 
-## Tech Stack
-
-| Layer | Library |
-|---|---|
-| Face detection | face-api.js 0.22.2 (SSD MobileNet v1) |
-| Face landmarks | 68-point landmark model |
-| Face recognition | 128-d descriptor net |
-| Storage | IndexedDB (no server) |
-| Hosting | GitHub Pages (static) |
+---
 
 ## Deploy to GitHub Pages
 
-1. Create a new GitHub repository
-2. Upload all files to the root:
-   - `index.html`
-   - `style.css`
-   - `db.js`
-   - `ml.js`
-   - `app.js`
-   - `404.html`
-3. Go to **Settings → Pages → Source** → set to `main` branch, root `/`
-4. Your site will be live at `https://<username>.github.io/<repo-name>/`
+1. Create a new repo (any name).
+2. Drop these files in the root:
+   ```
+   index.html
+   style.css
+   db.js
+   ml.js
+   app.js
+   README.md
+   ```
+3. Push to `main`.
+4. Repo → **Settings → Pages → Source → Deploy from branch → main / root**.
+5. Visit `https://<username>.github.io/<repo>/`.
 
-> **First load:** The face-api.js models (~6 MB) are fetched from jsDelivr CDN and cached by the browser. Subsequent loads are instant.
+First load downloads ~6 MB of model weights (face detector + landmarks + recognition net) from a public CDN; subsequent loads use the browser cache.
 
-## Usage
+---
 
-### Step 1 — Setup a Room
-1. Go to **01 / SETUP**
-2. Upload a photo of the **empty room** (chairs visible, no people)
-3. Click each chair to place a numbered marker
-4. Name the room and click **SAVE ROOM LAYOUT**
+## How it works
 
-### Step 2 — Take Attendance
-1. Go to **02 / ATTEND**
-2. Select the room from the dropdown
-3. Upload a photo of the room **with people in seats**
-4. The system detects faces and matches them to known people
-5. Unknown faces open an **Identify** dialog — enter names or link to existing people
-6. Click **SAVE ATTENDANCE**
+| Layer | What |
+|---|---|
+| **face-api.js** | Loaded from `cdn.jsdelivr.net`. Uses TinyFaceDetector (fast), 68-point landmarks, and the FaceNet-style 128-d descriptor. |
+| **Models** | Pulled from `cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights` (jsdelivr serving the original GitHub repo). Falls back to `justadudewhohacks.github.io/face-api.js/models`. |
+| **Recognition** | Each detected face becomes a 128-float vector. New faces are matched against the roster by Euclidean distance with a tightened threshold of `0.55` (face-api default is 0.6). Match → log attendance. No match → prompt for identification. |
+| **Storage** | Three IndexedDB stores: `rooms`, `people`, `sessions`. Image blobs are stored directly; descriptors as `Float32Array`. |
+| **Seat assignment** | Greedy nearest-pair: the closest face↔chair pair is matched first, then the next, until everyone or every seat is taken. People not near any chair are recorded as "off-seat". |
 
-### Step 3 — View Reports
-- **03 / PEOPLE** — Full roster with thumbnails, sample counts, rename/delete
-- **04 / REPORTS** — Session history, export JSON/CSV, reset all data
+---
 
-## Notes
+## Privacy
 
-- All processing is local — no photos or face data ever leave your browser
-- Face descriptors are stored as Float32Arrays in IndexedDB alongside JPEG thumbnails
-- People can sit in different seats on different days — the system tracks by face, not seat
-- Recognition threshold is 0.52 Euclidean distance (lower = stricter). Tunable in `ml.js`
-- For best results: good lighting, faces reasonably visible and forward-facing
+Everything stays in your browser. The only network calls are:
+- Loading `face-api.js` (script) and the model weights (JSON + binary shards) from a public CDN on first load.
+- Loading Google Fonts (visual only).
+
+No telemetry, no servers, no analytics. Opening DevTools → Network confirms there are zero outbound requests once models cache.
+
+---
+
+## Notes & limits
+
+- **Photo angle matters.** The chair layout you mark in Setup is in image coordinates. Take attendance photos from a roughly similar angle so the seat positions still line up. People are still recognized regardless of seat — the seat is just metadata.
+- **Recognition improves with use.** Each time you confirm an existing person, that face's descriptor is *added* to their record. After a few sessions the system gets noticeably more reliable across lighting/angle/expression changes.
+- **Threshold tuning.** If you get false matches, increase strictness in `ml.js` (`MATCH_THRESHOLD = 0.55` → `0.5`). If you get false rejections, loosen to `0.6`.
+- **Detector size.** TinyFaceDetector is set to `inputSize: 512`. Drop to `320` for faster mobile detection at the cost of small-face accuracy, or raise to `608` for higher quality on big group photos.
+
+---
+
+## File structure
+
+```
+index.html      — UI shell, four tabs, modals
+style.css       — dark dashboard theme
+db.js           — IndexedDB wrapper (rooms, people, sessions, export, reset)
+ml.js           — face-api.js setup, detection, matching, chair assignment
+app.js          — main controller, event wiring, all UI logic
+```
+
+Open in any modern browser. No build step. No node_modules. No backend.
