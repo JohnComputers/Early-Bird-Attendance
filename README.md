@@ -1,160 +1,155 @@
 # ATTENDANCE.SYS
 
-A fully **client-side** facial-recognition attendance tracker. Mark seat positions from an empty-room photo, then take attendance from a filled-room photo. Everything runs in the browser — no server, no API keys, no data leaves your device.
-
-Built for GitHub Pages.
+A facial-recognition attendance tracker. Mark seat positions from an empty-room photo, then auto-take attendance from a filled-room photo. Recognition runs locally in your browser; everything else is stored in your own private Firebase project so it syncs across devices.
 
 ---
 
 ## Features
 
-- **Setup** — Upload a photo of an empty room, click on each chair to mark seat positions. Save the layout under a name. Multiple rooms supported.
-- **Attendance** — Upload a filled-ro# ATTENDANCE.SYS
-
-A fully **client-side** facial-recognition attendance tracker. Mark seat positions from an empty-room photo, then take attendance from a filled-room photo. Everything runs in the browser — no server, no API keys, no data leaves your device.
-
-Built for GitHub Pages.
+- **Setup** — upload an empty-room photo, click chairs to mark seat positions.
+- **Attendance** — upload a filled-room photo, faces are detected and matched against your roster, unknowns prompt for identification.
+- **People** — auto-built roster. Each person stores multiple face samples so recognition gets better over time.
+- **Reports** — full session history, JSON / CSV export, reset.
+- **Sync** — sign in with Google on any device, see the same data.
 
 ---
 
-## Features
+## Setting up Firebase (one-time, ~10 minutes)
 
-- **Setup** — Upload a photo of an empty room, click on each chair to mark seat positions. Save the layout under a name. Multiple rooms supported.
-- **Attendance** — Upload a filled-room photo. Faces are detected, matched against your roster, and assigned to the nearest chair. Unknown faces prompt you to identify them (pick existing person or new name).
-- **People** — Roster of everyone the system has learned. Each person stores multiple face samples for better recognition over time.
-- **Reports** — Full session history with date, room, attendance count, and who was there. Export to JSON or CSV. Reset the entire database with a typed confirmation.
-- **Persistence** — Everything stored in IndexedDB (rooms, people, sessions including the original photos). Survives page reloads.
+You're going to:
+1. Create a free Firebase project
+2. Enable Auth, Firestore, and Storage
+3. Paste in the security rules included in this repo
+4. Copy your project's config into `firebase-config.js`
+5. Authorize your GitHub Pages domain
+
+### 1 — Create the project
+
+1. Go to [console.firebase.google.com](https://console.firebase.google.com).
+2. Click **Add project**. Name it anything (e.g. `attendance-sys`). Disable Google Analytics if asked — you don't need it.
+3. Wait for it to finish provisioning, then click **Continue**.
+
+### 2 — Enable Google sign-in
+
+1. In the left sidebar: **Build → Authentication → Get started**.
+2. **Sign-in method** tab → **Google** → toggle on, give it a public-facing project name and pick your support email → **Save**.
+
+### 3 — Enable Firestore + paste rules
+
+1. **Build → Firestore Database → Create database**.
+2. Pick the location closest to you. Start in **production mode**.
+3. Once created, go to the **Rules** tab.
+4. Replace the entire contents with [`firestore.rules`](firestore.rules) from this repo. Click **Publish**.
+
+### 4 — Enable Storage + paste rules
+
+1. **Build → Storage → Get started**. Production mode. Same location.
+2. **Rules** tab → replace contents with [`storage.rules`](storage.rules). **Publish**.
+
+### 5 — Get your config
+
+1. **Project settings** (the gear icon, top-left).
+2. Scroll to **Your apps** → click the **`</>`** (web) icon.
+3. Nickname it (e.g. `web`). **Don't** check the "Firebase Hosting" box. Click **Register app**.
+4. Copy the `firebaseConfig` object that appears.
+5. Open `firebase-config.js` in this repo and paste your values in:
+
+   ```js
+   window.FIREBASE_CONFIG = {
+     apiKey:            "AIza…",
+     authDomain:        "attendance-sys.firebaseapp.com",
+     projectId:         "attendance-sys",
+     storageBucket:     "attendance-sys.appspot.com",
+     messagingSenderId: "123456789012",
+     appId:             "1:1234…:web:abcd…"
+   };
+   ```
+
+### 6 — Authorize your GitHub Pages domain
+
+Sign-in only works from domains Firebase trusts.
+
+1. **Authentication → Settings → Authorized domains → Add domain**.
+2. Add `<your-username>.github.io` (just the hostname, no slash, no path).
+3. `localhost` is already there for local testing.
 
 ---
 
 ## Deploy to GitHub Pages
 
-1. Create a new repo (any name).
-2. Drop these files in the root:
+1. Push these files to a repo:
    ```
    index.html
    style.css
+   firebase-config.js   ← with your real config
+   auth.js
    db.js
    ml.js
    app.js
+   firestore.rules
+   storage.rules
    README.md
    ```
-3. Push to `main`.
-4. Repo → **Settings → Pages → Source → Deploy from branch → main / root**.
-5. Visit `https://<username>.github.io/<repo>/`.
-
-First load downloads ~6 MB of model weights (face detector + landmarks + recognition net) from a public CDN; subsequent loads use the browser cache.
+2. **Settings → Pages → Source → Deploy from branch → main / root**.
+3. Visit `https://<username>.github.io/<repo>/`.
+4. First load: sign in with Google → ~6 MB of vision models download once → you're in.
 
 ---
 
-## How it works
+## Free-tier capacity (it's plenty)
 
-| Layer | What |
-|---|---|
-| **face-api.js** | Loaded from `cdn.jsdelivr.net`. Uses TinyFaceDetector (fast), 68-point landmarks, and the FaceNet-style 128-d descriptor. |
-| **Models** | Pulled from `cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights` (jsdelivr serving the original GitHub repo). Falls back to `justadudewhohacks.github.io/face-api.js/models`. |
-| **Recognition** | Each detected face becomes a 128-float vector. New faces are matched against the roster by Euclidean distance with a tightened threshold of `0.55` (face-api default is 0.6). Match → log attendance. No match → prompt for identification. |
-| **Storage** | Three IndexedDB stores: `rooms`, `people`, `sessions`. Image blobs are stored directly; descriptors as `Float32Array`. |
-| **Seat assignment** | Greedy nearest-pair: the closest face↔chair pair is matched first, then the next, until everyone or every seat is taken. People not near any chair are recorded as "off-seat". |
+The Firebase Spark (free) plan gives you:
+- 50 K Firestore reads / 20 K writes per day
+- 5 GB Storage total, 1 GB/day download
+- Unlimited Google sign-ins
+
+A school club with 30 people meeting twice a week uses well under 1% of any of these. The only thing that meaningfully accumulates is photo storage — at ~500 KB per photo, you've got room for ~10 000 photos before paying anything.
 
 ---
 
 ## Privacy
 
-Everything stays in your browser. The only network calls are:
-- Loading `face-api.js` (script) and the model weights (JSON + binary shards) from a public CDN on first load.
-- Loading Google Fonts (visual only).
-
-No telemetry, no servers, no analytics. Opening DevTools → Network confirms there are zero outbound requests once models cache.
-
----
-
-## Notes & limits
-
-- **Photo angle matters.** The chair layout you mark in Setup is in image coordinates. Take attendance photos from a roughly similar angle so the seat positions still line up. People are still recognized regardless of seat — the seat is just metadata.
-- **Recognition improves with use.** Each time you confirm an existing person, that face's descriptor is *added* to their record. After a few sessions the system gets noticeably more reliable across lighting/angle/expression changes.
-- **Threshold tuning.** If you get false matches, increase strictness in `ml.js` (`MATCH_THRESHOLD = 0.55` → `0.5`). If you get false rejections, loosen to `0.6`.
-- **Detector size.** TinyFaceDetector is set to `inputSize: 512`. Drop to `320` for faster mobile detection at the cost of small-face accuracy, or raise to `608` for higher quality on big group photos.
+- Authentication is per-user. Each Google account gets its own private subtree at `users/{your-uid}/`.
+- The security rules in this repo enforce that only the signed-in user can read or write their own data. No public access. Even people with your project ID can't read your data.
+- **Face recognition runs entirely in your browser.** The `face-api.js` model weights are cached locally; raw images are uploaded to your Storage bucket but never sent to a third-party recognition API.
+- **Heads up on biometrics:** if you're tracking minors (e.g. for a school club), check your district's AUP — many require parental consent for storing biometric data even on a private cloud project.
 
 ---
 
 ## File structure
 
 ```
-index.html      — UI shell, four tabs, modals
-style.css       — dark dashboard theme
-db.js           — IndexedDB wrapper (rooms, people, sessions, export, reset)
-ml.js           — face-api.js setup, detection, matching, chair assignment
-app.js          — main controller, event wiring, all UI logic
+index.html          UI shell
+style.css           dark dashboard theme
+firebase-config.js  YOUR project config (you fill in)
+auth.js             Google sign-in wrapper
+db.js               Firestore + Storage CRUD layer
+ml.js               face-api.js setup, detection, matching
+app.js              main controller
+firestore.rules     paste into Firestore Rules tab
+storage.rules       paste into Storage Rules tab
 ```
 
-Open in any modern browser. No build step. No node_modules. No backend.
-om photo. Faces are detected, matched against your roster, and assigned to the nearest chair. Unknown faces prompt you to identify them (pick existing person or new name).
-- **People** — Roster of everyone the system has learned. Each person stores multiple face samples for better recognition over time.
-- **Reports** — Full session history with date, room, attendance count, and who was there. Export to JSON or CSV. Reset the entire database with a typed confirmation.
-- **Persistence** — Everything stored in IndexedDB (rooms, people, sessions including the original photos). Survives page reloads.
+---
+
+## Troubleshooting
+
+**"Firebase is not configured"** — `firebase-config.js` still has placeholder values. Paste your real config from the Firebase console.
+
+**"unauthorized-domain" on sign-in** — Add `<your-username>.github.io` to **Authentication → Settings → Authorized domains**.
+
+**Sign-in pop-up immediately closes / "popup-blocked"** — the app falls back to redirect-based sign-in automatically. Just complete the Google flow and you'll land back signed in.
+
+**"Missing or insufficient permissions"** — Your Firestore or Storage rules weren't published. Re-paste them from `firestore.rules` / `storage.rules` and click Publish.
+
+**Sessions show but the photo says "Image unavailable"** — Storage rules are blocking reads. Confirm `storage.rules` was published, not just saved.
+
+**Offline behavior** — Firestore caches reads in IndexedDB so you can browse data offline. Uploads (new sessions, identifications) require connectivity and will fail offline; just reconnect and re-try.
 
 ---
 
-## Deploy to GitHub Pages
+## Tuning
 
-1. Create a new repo (any name).
-2. Drop these files in the root:
-   ```
-   index.html
-   style.css
-   db.js
-   ml.js
-   app.js
-   README.md
-   ```
-3. Push to `main`.
-4. Repo → **Settings → Pages → Source → Deploy from branch → main / root**.
-5. Visit `https://<username>.github.io/<repo>/`.
-
-First load downloads ~6 MB of model weights (face detector + landmarks + recognition net) from a public CDN; subsequent loads use the browser cache.
-
----
-
-## How it works
-
-| Layer | What |
-|---|---|
-| **face-api.js** | Loaded from `cdn.jsdelivr.net`. Uses TinyFaceDetector (fast), 68-point landmarks, and the FaceNet-style 128-d descriptor. |
-| **Models** | Pulled from `cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights` (jsdelivr serving the original GitHub repo). Falls back to `justadudewhohacks.github.io/face-api.js/models`. |
-| **Recognition** | Each detected face becomes a 128-float vector. New faces are matched against the roster by Euclidean distance with a tightened threshold of `0.55` (face-api default is 0.6). Match → log attendance. No match → prompt for identification. |
-| **Storage** | Three IndexedDB stores: `rooms`, `people`, `sessions`. Image blobs are stored directly; descriptors as `Float32Array`. |
-| **Seat assignment** | Greedy nearest-pair: the closest face↔chair pair is matched first, then the next, until everyone or every seat is taken. People not near any chair are recorded as "off-seat". |
-
----
-
-## Privacy
-
-Everything stays in your browser. The only network calls are:
-- Loading `face-api.js` (script) and the model weights (JSON + binary shards) from a public CDN on first load.
-- Loading Google Fonts (visual only).
-
-No telemetry, no servers, no analytics. Opening DevTools → Network confirms there are zero outbound requests once models cache.
-
----
-
-## Notes & limits
-
-- **Photo angle matters.** The chair layout you mark in Setup is in image coordinates. Take attendance photos from a roughly similar angle so the seat positions still line up. People are still recognized regardless of seat — the seat is just metadata.
-- **Recognition improves with use.** Each time you confirm an existing person, that face's descriptor is *added* to their record. After a few sessions the system gets noticeably more reliable across lighting/angle/expression changes.
-- **Threshold tuning.** If you get false matches, increase strictness in `ml.js` (`MATCH_THRESHOLD = 0.55` → `0.5`). If you get false rejections, loosen to `0.6`.
-- **Detector size.** TinyFaceDetector is set to `inputSize: 512`. Drop to `320` for faster mobile detection at the cost of small-face accuracy, or raise to `608` for higher quality on big group photos.
-
----
-
-## File structure
-
-```
-index.html      — UI shell, four tabs, modals
-style.css       — dark dashboard theme
-db.js           — IndexedDB wrapper (rooms, people, sessions, export, reset)
-ml.js           — face-api.js setup, detection, matching, chair assignment
-app.js          — main controller, event wiring, all UI logic
-```
-
-Open in any modern browser. No build step. No node_modules. No backend.
+Open `ml.js` to tweak:
+- `MATCH_THRESHOLD = 0.55` — lower = stricter matching (fewer false matches, more false rejections). face-api.js default is 0.6.
+- `inputSize: 512` in `detectorOptions()` — drop to 320 for faster mobile, raise to 608 for higher accuracy on big group photos.
