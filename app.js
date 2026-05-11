@@ -1,6 +1,10 @@
 /* =========================================================
-   app.js — ATTENDANCE.SYS main controller (Firebase backend)
-   Wires UI ↔ DB (Firestore + Storage) ↔ ML.
+   app.js — ATTENDANCE.SYS main controller (Firestore-only backend)
+
+   Coordinate conventions:
+     - state.setup.chairs    [{ x, y }]   normalized 0..1
+     - state.att.faces[].box { x,y,w,h }  pixel coords (transient)
+     - saved attendee.box     { x,y,w,h } normalized 0..1
 ========================================================= */
 
 const App = (() => {
@@ -12,23 +16,21 @@ const App = (() => {
     activeTab: 'setup',
     rooms: [], people: [], sessions: [],
 
-    // Setup
     setup: {
-      image: null,         // HTMLImageElement
-      imageBlob: null,     // new upload waiting to be saved
-      imageUrl: null,      // existing (when editing)
-      chairs: [],
+      image: null,
+      imageBlob: null,        // new upload waiting to save
+      imageUrl: null,         // existing image (when editing)
+      chairs: [],             // normalized 0..1
       editingRoomId: null,
     },
 
-    // Attendance
     att: {
       roomId: null,
       room: null,
       image: null,
       imageBlob: null,
       faces: [],
-      faceCrops: [],
+      faceCrops: [],          // array of data-URL strings
       attendees: [],
       pending: false,
     },
@@ -42,7 +44,6 @@ const App = (() => {
     bindGlobalEvents();
     bindSignInEvents();
 
-    // Init Firebase + check auth
     bootStatus('CONNECTING TO FIREBASE…');
     try {
       Auth.init();
@@ -84,7 +85,7 @@ const App = (() => {
       await refreshAll();
     } catch (err) {
       return bootFail('Could not load data: ' + err.message +
-        ' — check that your Firestore rules allow this user to read /users/{uid}.');
+        ' — verify your Firestore rules allow this user to read /users/{uid}.');
     }
     bootProgress(100);
     bootLog('> All systems online.');
@@ -93,10 +94,7 @@ const App = (() => {
     setStatus('Ready.', 'ok');
     setModelStatus('MODELS: loaded');
 
-    // React to sign-out from any source
-    Auth.onChange(u => {
-      if (!u) location.reload();
-    });
+    Auth.onChange(u => { if (!u) location.reload(); });
   }
 
   function showSignInScreen() {
@@ -128,7 +126,6 @@ const App = (() => {
     document.getElementById('signOutBtn').addEventListener('click', async () => {
       if (!confirm('Sign out?')) return;
       await Auth.signOut();
-      // onChange listener will reload
     });
   }
 
@@ -254,7 +251,8 @@ const App = (() => {
     ctx.drawImage(img, 0, 0);
 
     const r = Math.max(18, Math.min(c.width, c.height) * 0.018);
-    state.setup.chairs.forEach((ch, i) => drawSeatMarker(ctx, ch.x, ch.y, i + 1, r));
+    state.setup.chairs.forEach((ch, i) =>
+      drawSeatMarker(ctx, ch.x * c.width, ch.y * c.height, i + 1, r));
   }
 
   function fitCanvas(c) {
@@ -299,16 +297,21 @@ const App = (() => {
   function onSetupCanvasClick(e) {
     const c = e.currentTarget;
     const rect = c.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (c.width  / rect.width);
-    const y = (e.clientY - rect.top)  * (c.height / rect.height);
+    // pixel position in image's natural-size coord space
+    const px = (e.clientX - rect.left) * (c.width  / rect.width);
+    const py = (e.clientY - rect.top)  * (c.height / rect.height);
+    // normalized 0..1
+    const nx = px / c.width;
+    const ny = py / c.height;
 
+    // hit test on existing markers (compare in pixel space)
     const r = Math.max(28, Math.min(c.width, c.height) * 0.025);
     const hit = state.setup.chairs.findIndex(ch =>
-      Math.hypot(ch.x - x, ch.y - y) < r);
+      Math.hypot(ch.x * c.width - px, ch.y * c.height - py) < r);
     if (hit >= 0) {
       state.setup.chairs.splice(hit, 1);
     } else {
-      state.setup.chairs.push({ x, y });
+      state.setup.chairs.push({ x: nx, y: ny });
     }
     drawSetupCanvas();
     updateSeatCount();
@@ -340,18 +343,16 @@ const App = (() => {
     const name = document.getElementById('roomName').value.trim();
     if (!name || !state.setup.image || state.setup.chairs.length === 0) return;
 
-    setStatus('Uploading…', 'busy');
+    setStatus('Saving…', 'busy');
     const btn = document.getElementById('saveRoomBtn');
     btn.disabled = true;
 
     try {
       const room = {
         name,
-        imageBlob: state.setup.imageBlob,    // null if unchanged during edit
-        imageUrl:  state.setup.imageUrl,     // preserved when editing without new upload
-        chairs: state.setup.chairs.slice(),
-        imgWidth:  state.setup.image.naturalWidth,
-        imgHeight: state.setup.image.naturalHeight,
+        imageBlob: state.setup.imageBlob,   // null if unchanged during edit
+        imageUrl:  state.setup.imageUrl,    // preserved when editing without re-upload
+        chairs: state.setup.chairs.slice(), // normalized 0..1
         createdAt: new Date().toISOString(),
       };
 
@@ -414,7 +415,7 @@ const App = (() => {
       const img = await urlToImage(r.imageUrl);
       state.setup = {
         image: img,
-        imageBlob: null,           // only set if user re-uploads
+        imageBlob: null,
         imageUrl: r.imageUrl,
         chairs: (r.chairs || []).slice(),
         editingRoomId: r.id,
@@ -490,7 +491,12 @@ const App = (() => {
         faces.map(f => ML.cropFace(img, f.box))
       );
 
-      const chairAssignments = ML.assignFacesToChairs(faces, state.att.room.chairs || []);
+      const chairAssignments = ML.assignFacesToChairs(
+        faces,
+        state.att.room.chairs || [],
+        img.naturalWidth,
+        img.naturalHeight,
+      );
 
       const attendees = faces.map((f, i) => {
         const m = ML.matchFace(f.descriptor, state.people);
@@ -512,9 +518,7 @@ const App = (() => {
       renderAttendeesList();
 
       const unknowns = attendees.filter(a => a.isNew);
-      if (unknowns.length > 0) {
-        openIdentifyModal(unknowns);
-      }
+      if (unknowns.length > 0) openIdentifyModal(unknowns);
 
       document.getElementById('saveSessionBtn').disabled = false;
       document.getElementById('discardSessionBtn').disabled = false;
@@ -540,7 +544,8 @@ const App = (() => {
     if (room) {
       ctx.save();
       ctx.globalAlpha = 0.35;
-      (room.chairs || []).forEach((ch, i) => drawSeatMarker(ctx, ch.x, ch.y, i + 1, r));
+      (room.chairs || []).forEach((ch, i) =>
+        drawSeatMarker(ctx, ch.x * c.width, ch.y * c.height, i + 1, r));
       ctx.restore();
     }
 
@@ -584,8 +589,7 @@ const App = (() => {
       .slice()
       .sort((a, b) => (a.chairIdx ?? 999) - (b.chairIdx ?? 999))
       .forEach(att => {
-        const blob = state.att.faceCrops[att.faceIdx];
-        const url = URL.createObjectURL(blob);
+        const url = state.att.faceCrops[att.faceIdx];
         const seatLabel = (att.chairIdx !== null && att.chairIdx !== undefined)
           ? `Seat ${att.chairIdx + 1}` : 'Off-seat';
         const div = document.createElement('div');
@@ -606,8 +610,7 @@ const App = (() => {
     const root = document.getElementById('identifyList');
     root.innerHTML = '';
     unknowns.forEach(att => {
-      const blob = state.att.faceCrops[att.faceIdx];
-      const url = URL.createObjectURL(blob);
+      const url = state.att.faceCrops[att.faceIdx];
       const div = document.createElement('div');
       div.className = 'identify-item';
       div.dataset.faceIdx = att.faceIdx;
@@ -648,7 +651,6 @@ const App = (() => {
           continue;
         }
         if (sel && sel !== '__skip') {
-          // Match to existing person — add this descriptor as a new training sample.
           const personId = sel;
           const person = state.people.find(p => p.id === personId);
           if (person) {
@@ -661,12 +663,12 @@ const App = (() => {
           continue;
         }
         if (newName) {
-          const blob = state.att.faceCrops[faceIdx];
+          const thumbUrl = state.att.faceCrops[faceIdx];  // data URL
           const desc = state.att.faces[faceIdx].descriptor;
           const personId = await DB.addPerson({
             name: newName,
             descriptors: [desc],
-            thumbBlob: blob,
+            thumbUrl,
             firstSeen: new Date().toISOString(),
             lastSeen: new Date().toISOString(),
             encounters: 0,
@@ -702,24 +704,33 @@ const App = (() => {
     btn.disabled = true;
 
     try {
+      const W = state.att.image.naturalWidth;
+      const H = state.att.image.naturalHeight;
+
       const session = {
         roomId: state.att.roomId,
         roomName: state.att.room.name,
         date: new Date().toISOString(),
         imageBlob: state.att.imageBlob,
-        attendees: state.att.attendees.map(a => ({
-          personId: a.personId,
-          name: a.name || 'Anonymous',
-          isAnonymous: !a.personId,
-          chairIdx: a.chairIdx,
-          box: state.att.faces[a.faceIdx].box,
-        })),
+        attendees: state.att.attendees.map(a => {
+          const b = state.att.faces[a.faceIdx].box;
+          return {
+            personId: a.personId,
+            name: a.name || 'Anonymous',
+            isAnonymous: !a.personId,
+            chairIdx: a.chairIdx,
+            // Normalize box coords so they work regardless of saved-image resolution
+            box: {
+              x: b.x / W, y: b.y / H,
+              width: b.width / W, height: b.height / H,
+            },
+          };
+        }),
         faceCount: state.att.faces.length,
         seatCount: (state.att.room.chairs || []).length,
       };
       await DB.addSession(session);
 
-      // bump people lastSeen / encounters
       const presentIds = new Set(session.attendees.map(a => a.personId).filter(Boolean));
       for (const pid of presentIds) {
         const p = state.people.find(x => x.id === pid);
@@ -885,7 +896,7 @@ const App = (() => {
     try {
       const img = await urlToImage(s.imageUrl);
       canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
+      canvas.width  = img.naturalWidth;
       canvas.height = img.naturalHeight;
       canvas.style.width = '100%';
       canvas.style.height = 'auto';
@@ -894,17 +905,22 @@ const App = (() => {
       ctx.drawImage(img, 0, 0);
       (s.attendees || []).forEach(a => {
         if (!a.box) return;
+        // boxes are stored normalized; scale to canvas
+        const bx = a.box.x * canvas.width;
+        const by = a.box.y * canvas.height;
+        const bw = a.box.width  * canvas.width;
+        const bh = a.box.height * canvas.height;
         ctx.lineWidth = Math.max(2, canvas.width * 0.0025);
         ctx.strokeStyle = a.isAnonymous ? '#ffb547' : '#c8ff00';
         ctx.fillStyle   = a.isAnonymous ? '#ffb547' : '#c8ff00';
-        ctx.strokeRect(a.box.x, a.box.y, a.box.width, a.box.height);
+        ctx.strokeRect(bx, by, bw, bh);
         const fontSize = Math.max(14, canvas.width * 0.018);
         ctx.font = `700 ${fontSize}px JetBrains Mono, monospace`;
         const tw = ctx.measureText(a.name).width + fontSize * 0.8;
-        ctx.fillRect(a.box.x, a.box.y - fontSize * 1.4, tw, fontSize * 1.4);
+        ctx.fillRect(bx, by - fontSize * 1.4, tw, fontSize * 1.4);
         ctx.fillStyle = '#0a0d0a';
         ctx.textBaseline = 'middle';
-        ctx.fillText(a.name, a.box.x + fontSize * 0.4, a.box.y - fontSize * 0.7);
+        ctx.fillText(a.name, bx + fontSize * 0.4, by - fontSize * 0.7);
       });
     } catch (err) {
       canvas = document.createElement('div');
@@ -1019,7 +1035,6 @@ const App = (() => {
     return new Promise((resolve, reject) => {
       if (!url) return reject(new Error('No image URL'));
       const img = new Image();
-      img.crossOrigin = 'anonymous';     // needed to safely draw to canvas
       img.onload = () => resolve(img);
       img.onerror = () => reject(new Error('Could not load image from URL'));
       img.src = url;
@@ -1094,7 +1109,7 @@ const App = (() => {
     setStatus('Boot failed — ' + msg, 'error');
     setModelStatus('MODELS: error');
     document.getElementById('bootHint').textContent =
-      'Reload to retry. If this persists, check firebase-config.js, your Firestore/Storage rules, and your auth provider settings.';
+      'Reload to retry. If this persists, check firebase-config.js and your Firestore rules.';
   }
 
   return { init };

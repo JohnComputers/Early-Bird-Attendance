@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ATTENDANCE.SYS — Visual Attendance Tracker</title>
-  <meta name="description" content="Client-side facial-recognition attendance tracker backed by Firebase. Mark chair positions, then auto-take attendance from a photo." />
+  <meta name="description" content="Client-side facial-recognition attendance tracker backed by Firestore. Mark chair positions, then auto-take attendance from a photo." />
   <link rel="stylesheet" href="style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -51,7 +51,7 @@
       </button>
       <div id="signInError" class="signin-error hidden"></div>
       <div class="boot-hint">
-        Backend: Firebase Firestore + Storage · Recognition runs locally in your browser
+        Backend: Firebase Firestore · Recognition runs locally in your browser
       </div>
     </div>
   </div>
@@ -282,7 +282,7 @@
     <span class="spacer"></span>
     <span id="statusModel">MODELS: idle</span>
     <span class="meta-sep">·</span>
-    <span>Firebase backend · recognition runs locally</span>
+    <span>Firestore backend · recognition runs locally</span>
   </footer>
 
   <!-- ========= IDENTIFY MODAL ========= -->
@@ -315,11 +315,10 @@
   <!-- ========= TOAST ========= -->
   <div id="toast" class="toast hidden"></div>
 
-  <!-- Firebase compat SDKs (work with regular script tags) -->
+  <!-- Firebase compat SDKs (Storage NOT loaded — we don't use it) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js"></script>
 
   <!-- face-api.js (bundles its own TF backend) -->
   <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>

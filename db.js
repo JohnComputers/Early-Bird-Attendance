@@ -1,32 +1,31 @@
 /* ============================================================
-   db.js — Firebase Firestore + Storage backend
+   db.js — Firestore-only backend (no Storage / no paid plan needed)
    ------------------------------------------------------------
-   Layout (all per-user, isolated by security rules):
+   Images are downscaled and stored as base64 data URLs *inside*
+   the Firestore documents themselves. Firestore allows ~1 MB per
+   document, which comfortably fits a downscaled JPEG at quality 0.7.
+
+   Layout (per signed-in user, isolated by security rules):
      users/{uid}/rooms/{roomId}        → name, chairs, imageUrl, ...
      users/{uid}/people/{personId}     → name, descriptors, thumbUrl, ...
      users/{uid}/sessions/{sessionId}  → roomId, date, attendees, imageUrl, ...
-   Storage:
-     users/{uid}/rooms/{roomId}.jpg
-     users/{uid}/people/{personId}.jpg
-     users/{uid}/sessions/{sessionId}.jpg
-   ------------------------------------------------------------
-   Public API matches the original IndexedDB version. The only change
-   for the app: read-side image fields are URLs ("imageUrl", "thumbUrl")
-   instead of Blobs.
+
+   Coordinate convention:
+     - chairs:     { x, y }       in 0..1 normalized (image-relative)
+     - box (att.): { x,y,w,h }    in 0..1 normalized (image-relative)
+   This lets the room and attendance photos have different
+   resolutions without alignment breaking.
 ============================================================ */
 
 const DB = (() => {
 
-  // -------- helpers --------
   const fs = () => firebase.firestore();
-  const st = () => firebase.storage();
 
   function uid() { return Auth.requireUid(); }
   function col(name) { return fs().collection(`users/${uid()}/${name}`); }
   function docRef(coll, id) { return fs().doc(`users/${uid()}/${coll}/${id}`); }
-  function storageRef(path) { return st().ref(`users/${uid()}/${path}`); }
 
-  // Firestore disallows directly nested arrays; wrap each Float32Array as { v: [...] }.
+  // Firestore disallows directly nested arrays; wrap each descriptor.
   function descToWire(d) {
     return { v: d instanceof Float32Array ? Array.from(d) : Array.from(d || []) };
   }
@@ -34,14 +33,44 @@ const DB = (() => {
     return new Float32Array(o.v || []);
   }
 
-  async function uploadBlob(path, blob, contentType = 'image/jpeg') {
-    const ref = storageRef(path);
-    await ref.put(blob, { contentType });
-    return ref.getDownloadURL();
+  // Per-document budget. Firestore hard limit is 1,048,487 bytes — leave headroom.
+  const MAX_DOC_BYTES = 900_000;
+
+  /**
+   * Take a Blob → downscaled JPEG data URL string.
+   * Progressively reduces dimensions/quality until under MAX_DOC_BYTES.
+   */
+  async function blobToCompressedDataUrl(blob, opts = {}) {
+    const { maxDim = 1280, quality = 0.7, budget = MAX_DOC_BYTES } = opts;
+    const img = await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const im  = new Image();
+      im.onload  = () => { URL.revokeObjectURL(url); resolve(im); };
+      im.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image decode failed')); };
+      im.src = url;
+    });
+
+    let dim = maxDim;
+    let q   = quality;
+    let dataUrl = encode(img, dim, q);
+
+    // Pull both knobs until small enough.
+    while (dataUrl.length > budget && (q > 0.35 || dim > 480)) {
+      if (q > 0.35) q = Math.max(0.35, q - 0.08);
+      else          dim = Math.max(480, Math.round(dim * 0.85));
+      dataUrl = encode(img, dim, q);
+    }
+    return dataUrl;
   }
-  async function deleteFile(path) {
-    try { await storageRef(path).delete(); }
-    catch (err) { /* not-found is fine */ }
+
+  function encode(img, maxDim, quality) {
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth  * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    return c.toDataURL('image/jpeg', quality);
   }
 
   // No-op kept so app.js can `await DB.open()` exactly as before.
@@ -49,21 +78,18 @@ const DB = (() => {
 
   // -------- ROOMS --------
   async function addRoom(room) {
-    const ref = col('rooms').doc();          // auto-id
-    const id = ref.id;
     let imageUrl = room.imageUrl || null;
     if (room.imageBlob) {
-      imageUrl = await uploadBlob(`rooms/${id}.jpg`, room.imageBlob);
+      imageUrl = await blobToCompressedDataUrl(room.imageBlob, { maxDim: 1280, quality: 0.7 });
     }
+    const ref = col('rooms').doc();
     await ref.set({
       name: room.name,
       chairs: room.chairs || [],
-      imgWidth: room.imgWidth,
-      imgHeight: room.imgHeight,
       imageUrl,
       createdAt: room.createdAt || new Date().toISOString(),
     });
-    return id;
+    return ref.id;
   }
 
   async function getRooms() {
@@ -77,43 +103,35 @@ const DB = (() => {
   }
 
   async function updateRoom(room) {
-    const ref = docRef('rooms', room.id);
     let imageUrl = room.imageUrl || null;
     if (room.imageBlob) {
-      imageUrl = await uploadBlob(`rooms/${room.id}.jpg`, room.imageBlob);
+      imageUrl = await blobToCompressedDataUrl(room.imageBlob, { maxDim: 1280, quality: 0.7 });
     }
-    await ref.set({
+    await docRef('rooms', room.id).set({
       name: room.name,
       chairs: room.chairs || [],
-      imgWidth: room.imgWidth,
-      imgHeight: room.imgHeight,
       imageUrl,
       createdAt: room.createdAt || new Date().toISOString(),
     });
   }
 
   async function deleteRoom(id) {
-    await deleteFile(`rooms/${id}.jpg`);
     await docRef('rooms', id).delete();
   }
 
   // -------- PEOPLE --------
+  // thumbUrl is a small (~200px) JPEG data URL produced by ML.cropFace.
   async function addPerson(person) {
     const ref = col('people').doc();
-    const id = ref.id;
-    let thumbUrl = person.thumbUrl || null;
-    if (person.thumbBlob) {
-      thumbUrl = await uploadBlob(`people/${id}.jpg`, person.thumbBlob);
-    }
     await ref.set({
       name: person.name,
       descriptors: (person.descriptors || []).map(descToWire),
-      thumbUrl,
+      thumbUrl: person.thumbUrl || null,
       firstSeen: person.firstSeen || new Date().toISOString(),
       lastSeen:  person.lastSeen  || new Date().toISOString(),
       encounters: person.encounters || 0,
     });
-    return id;
+    return ref.id;
   }
 
   async function getPeople() {
@@ -136,32 +154,27 @@ const DB = (() => {
   }
 
   async function updatePerson(person) {
-    const ref = docRef('people', person.id);
     const update = {
       name: person.name,
       descriptors: (person.descriptors || []).map(descToWire),
       lastSeen: person.lastSeen || new Date().toISOString(),
       encounters: person.encounters || 0,
     };
-    if (person.thumbBlob) {
-      update.thumbUrl = await uploadBlob(`people/${person.id}.jpg`, person.thumbBlob);
-    }
-    await ref.update(update);
+    if (person.thumbUrl) update.thumbUrl = person.thumbUrl;
+    await docRef('people', person.id).update(update);
   }
 
   async function deletePerson(id) {
-    await deleteFile(`people/${id}.jpg`);
     await docRef('people', id).delete();
   }
 
   // -------- SESSIONS --------
   async function addSession(session) {
-    const ref = col('sessions').doc();
-    const id = ref.id;
     let imageUrl = null;
     if (session.imageBlob) {
-      imageUrl = await uploadBlob(`sessions/${id}.jpg`, session.imageBlob);
+      imageUrl = await blobToCompressedDataUrl(session.imageBlob, { maxDim: 1280, quality: 0.7 });
     }
+    const ref = col('sessions').doc();
     await ref.set({
       roomId:    session.roomId,
       roomName:  session.roomName,
@@ -171,7 +184,7 @@ const DB = (() => {
       faceCount: session.faceCount || 0,
       seatCount: session.seatCount || 0,
     });
-    return id;
+    return ref.id;
   }
 
   async function getSessions() {
@@ -185,7 +198,6 @@ const DB = (() => {
   }
 
   async function deleteSession(id) {
-    await deleteFile(`sessions/${id}.jpg`);
     await docRef('sessions', id).delete();
   }
 
@@ -203,12 +215,11 @@ const DB = (() => {
       getRooms(), getPeople(), getSessions(),
     ]);
     return {
-      version: 2,
-      backend: 'firebase',
+      version: 3,
+      backend: 'firestore-only',
       exportedAt: new Date().toISOString(),
       uid: uid(),
       rooms,
-      // descriptors → plain arrays for portability
       people: people.map(p => ({
         ...p,
         descriptors: (p.descriptors || []).map(d => Array.from(d)),
@@ -219,7 +230,6 @@ const DB = (() => {
 
   // -------- RESET --------
   async function reset() {
-    // Delete all docs (in batches so we don't hit transaction limits on big datasets)
     for (const name of ['rooms', 'people', 'sessions']) {
       const snap = await col(name).get();
       const docs = snap.docs;
@@ -229,13 +239,6 @@ const DB = (() => {
         chunk.forEach(d => batch.delete(d.ref));
         await batch.commit();
       }
-    }
-    // Delete all storage files for this user
-    for (const folder of ['rooms', 'people', 'sessions']) {
-      try {
-        const list = await storageRef(folder).listAll();
-        await Promise.all(list.items.map(item => item.delete().catch(() => {})));
-      } catch { /* no folder yet, fine */ }
     }
   }
 
