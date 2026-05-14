@@ -65,7 +65,8 @@ const ML = (() => {
   function shortHost(u) { try { return new URL(u).host; } catch { return u; } }
 
   /**
-   * Detect faces in an image. Boxes are in the image's natural pixel coords.
+   * Detect every face in an image. Returns boxes in the image's natural
+   * pixel coords, plus a 128-d descriptor for recognition.
    */
   async function detectFaces(img) {
     if (!modelsLoaded) throw new Error('Models not loaded');
@@ -108,7 +109,7 @@ const ML = (() => {
 
   /**
    * Crop a face region from an image as a small JPEG data URL.
-   * Returned string is suitable for use as img.src AND for storage.
+   * Returned string is suitable for use as img.src AND for Firestore storage.
    */
   async function cropFace(img, box, padding = 0.25) {
     const pad = Math.max(box.width, box.height) * padding;
@@ -124,46 +125,11 @@ const ML = (() => {
     return c.toDataURL('image/jpeg', 0.85);
   }
 
-  /**
-   * Assign each face to its nearest chair (normalized coordinates).
-   * Each chair receives at most one face (greedy nearest-pair).
-   *
-   * @param faces     [{ box: { x,y,width,height } }]  pixel coords in image
-   * @param chairs    [{ x, y }]                       NORMALIZED 0..1
-   * @param imgWidth  image width in pixels
-   * @param imgHeight image height in pixels
-   */
-  function assignFacesToChairs(faces, chairs, imgWidth, imgHeight) {
-    const assignments = new Array(faces.length).fill(null);
-    const chairTaken  = new Array(chairs.length).fill(false);
-    if (chairs.length === 0) return assignments;
-
-    const pairs = [];
-    faces.forEach((f, fi) => {
-      const fcx = (f.box.x + f.box.width  / 2) / imgWidth;   // → 0..1
-      const fcy = (f.box.y + f.box.height / 2) / imgHeight;
-      chairs.forEach((c, ci) => {
-        const dx = fcx - c.x, dy = fcy - c.y;
-        pairs.push({ fi, ci, d: Math.hypot(dx, dy) });
-      });
-    });
-    pairs.sort((a, b) => a.d - b.d);
-
-    for (const p of pairs) {
-      if (assignments[p.fi] !== null) continue;
-      if (chairTaken[p.ci])           continue;
-      assignments[p.fi] = p.ci;
-      chairTaken[p.ci]  = true;
-    }
-    return assignments;
-  }
-
   return {
     loadModels,
     detectFaces,
     matchFace,
     cropFace,
-    assignFacesToChairs,
     get ready() { return modelsLoaded; },
     MATCH_THRESHOLD,
   };

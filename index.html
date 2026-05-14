@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ATTENDANCE.SYS — Visual Attendance Tracker</title>
-  <meta name="description" content="Client-side facial-recognition attendance tracker backed by Firestore. Mark chair positions, then auto-take attendance from a photo." />
+  <meta name="description" content="Face-recognition attendance. Upload a photo, get who's there." />
   <link rel="stylesheet" href="style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -63,10 +63,9 @@
       <span class="brand-name">ATTENDANCE<span class="dim">.SYS</span></span>
     </div>
     <nav class="tabs" id="tabs" role="tablist">
-      <button class="tab active" data-tab="setup" role="tab">01 / SETUP</button>
-      <button class="tab" data-tab="attendance" role="tab">02 / ATTEND</button>
-      <button class="tab" data-tab="people" role="tab">03 / PEOPLE</button>
-      <button class="tab" data-tab="reports" role="tab">04 / REPORTS</button>
+      <button class="tab active" data-tab="attendance" role="tab">ATTEND</button>
+      <button class="tab" data-tab="people" role="tab">PEOPLE</button>
+      <button class="tab" data-tab="reports" role="tab">REPORTS</button>
     </nav>
     <div class="meta">
       <span class="meta-pair"><span class="meta-k">PPL</span><span class="meta-v" id="metaPeople">0</span></span>
@@ -82,94 +81,20 @@
   <main>
 
     <!-- ============================================================
-         01 / SETUP — Define chair positions
+         ATTENDANCE
     ============================================================= -->
-    <section id="setup" class="tab-content active">
+    <section id="attendance" class="tab-content active">
       <div class="panel">
         <header class="panel-head">
           <div>
-            <h2>01 / SETUP <span class="head-dim">— Define the Room</span></h2>
-            <p>Upload an <em>empty-room</em> photo, then click on each chair to mark seats. Click a marker again to remove it. Save when done.</p>
+            <h2>ATTEND <span class="head-dim">— Take Attendance</span></h2>
+            <p>Upload a photo. The system detects every face, matches against your roster, and prompts you to identify anyone new.</p>
           </div>
           <div class="head-tools">
-            <label class="btn primary">
-              <input type="file" id="setupFile" accept="image/*" hidden />
-              <span>UPLOAD ROOM PHOTO</span>
-            </label>
-          </div>
-        </header>
-
-        <div class="setup-grid">
-          <div class="canvas-wrap" id="setupCanvasWrap">
-            <div class="canvas-empty" id="setupEmpty">
-              <div class="canvas-empty-mark"></div>
-              <h3>NO IMAGE LOADED</h3>
-              <p>Upload an empty room photo to begin marking seat positions.</p>
-            </div>
-            <canvas id="setupCanvas" class="hidden"></canvas>
-          </div>
-
-          <aside class="side">
-            <div class="card">
-              <div class="card-head"><h3>ROOM</h3></div>
-              <div class="card-body">
-                <label class="field">
-                  <span>Name this room</span>
-                  <input type="text" id="roomName" placeholder="Robotics Lab — Tuesdays" />
-                </label>
-                <div class="kv">
-                  <span>Seats marked</span>
-                  <strong id="seatCount">0</strong>
-                </div>
-                <div class="kv">
-                  <span>Image dims</span>
-                  <strong id="imgDims">—</strong>
-                </div>
-              </div>
-            </div>
-
-            <div class="card">
-              <div class="card-head"><h3>TOOLS</h3></div>
-              <div class="card-body stack">
-                <button class="btn ghost" id="autoDetectBtn" disabled>
-                  <span>⚙</span> AUTO-DETECT CHAIRS
-                  <small>experimental</small>
-                </button>
-                <button class="btn ghost" id="clearChairsBtn" disabled>
-                  <span>×</span> CLEAR ALL MARKERS
-                </button>
-                <button class="btn primary block" id="saveRoomBtn" disabled>SAVE ROOM LAYOUT</button>
-              </div>
-            </div>
-
-            <div class="card">
-              <div class="card-head"><h3>SAVED ROOMS</h3></div>
-              <div class="card-body" id="roomsList">
-                <p class="muted">No rooms saved yet.</p>
-              </div>
-            </div>
-          </aside>
-        </div>
-      </div>
-    </section>
-
-    <!-- ============================================================
-         02 / ATTENDANCE
-    ============================================================= -->
-    <section id="attendance" class="tab-content">
-      <div class="panel">
-        <header class="panel-head">
-          <div>
-            <h2>02 / ATTEND <span class="head-dim">— Take Attendance</span></h2>
-            <p>Pick a room, upload a filled-room photo, identify any new faces, then save the session.</p>
-          </div>
-          <div class="head-tools">
-            <select id="attRoomSelect" class="select">
-              <option value="">— Select a room —</option>
-            </select>
-            <label class="btn primary" id="attUploadBtn">
+            <input type="text" id="sessionLabel" class="select" placeholder="Session label (optional)" />
+            <label class="btn primary" for="attFile">
               <input type="file" id="attFile" accept="image/*" hidden />
-              <span>UPLOAD ATTENDANCE PHOTO</span>
+              <span>UPLOAD PHOTO</span>
             </label>
           </div>
         </header>
@@ -179,7 +104,7 @@
             <div class="canvas-empty" id="attEmpty">
               <div class="canvas-empty-mark"></div>
               <h3>READY</h3>
-              <p>Select a room and upload a photo of who's there.</p>
+              <p>Drop a photo here, or click <strong>UPLOAD PHOTO</strong> above.</p>
             </div>
             <canvas id="attCanvas" class="hidden"></canvas>
           </div>
@@ -191,7 +116,6 @@
                 <div class="kv"><span>Faces detected</span><strong id="facesCount">—</strong></div>
                 <div class="kv"><span>Recognized</span><strong id="recCount">—</strong></div>
                 <div class="kv"><span>New / Unknown</span><strong id="unkCount">—</strong></div>
-                <div class="kv"><span>Seats filled</span><strong id="seatsFilled">—</strong></div>
               </div>
             </div>
 
@@ -204,6 +128,7 @@
               <div class="card-head"><h3>ACTIONS</h3></div>
               <div class="card-body stack">
                 <button class="btn primary block" id="saveSessionBtn" disabled>SAVE ATTENDANCE</button>
+                <button class="btn ghost block" id="reIdentifyBtn" disabled hidden>IDENTIFY UNKNOWNS</button>
                 <button class="btn ghost block" id="discardSessionBtn" disabled>DISCARD</button>
               </div>
             </div>
@@ -213,14 +138,14 @@
     </section>
 
     <!-- ============================================================
-         03 / PEOPLE
+         PEOPLE
     ============================================================= -->
     <section id="people" class="tab-content">
       <div class="panel">
         <header class="panel-head">
           <div>
-            <h2>03 / PEOPLE <span class="head-dim">— Roster</span></h2>
-            <p>Everyone the system has learned. Faces are stored as 128-d descriptors plus a thumbnail.</p>
+            <h2>PEOPLE <span class="head-dim">— Roster</span></h2>
+            <p>Everyone the system has learned. Each person stores multiple face samples; recognition gets better over time.</p>
           </div>
           <div class="head-tools">
             <input type="search" id="peopleSearch" class="select" placeholder="Search names…" />
@@ -236,14 +161,14 @@
     </section>
 
     <!-- ============================================================
-         04 / REPORTS
+         REPORTS
     ============================================================= -->
     <section id="reports" class="tab-content">
       <div class="panel">
         <header class="panel-head">
           <div>
-            <h2>04 / REPORTS <span class="head-dim">— History &amp; Export</span></h2>
-            <p>Every saved attendance session. Export the full database as JSON or a flat CSV.</p>
+            <h2>REPORTS <span class="head-dim">— History &amp; Export</span></h2>
+            <p>Every saved attendance session. Export the database as JSON or a flat CSV.</p>
           </div>
           <div class="head-tools">
             <button class="btn ghost" id="exportJsonBtn">EXPORT JSON</button>
@@ -259,15 +184,14 @@
             <thead>
               <tr>
                 <th>DATE</th>
-                <th>ROOM</th>
+                <th>LABEL</th>
                 <th>PRESENT</th>
-                <th>SEATS</th>
                 <th>ATTENDEES</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="sessionsTbody">
-              <tr><td colspan="6" class="muted center">No sessions recorded yet.</td></tr>
+              <tr><td colspan="5" class="muted center">No sessions recorded yet.</td></tr>
             </tbody>
           </table>
         </div>
@@ -315,7 +239,7 @@
   <!-- ========= TOAST ========= -->
   <div id="toast" class="toast hidden"></div>
 
-  <!-- Firebase compat SDKs (Storage NOT loaded — we don't use it) -->
+  <!-- Firebase compat SDKs (no Storage — Firestore-only) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>

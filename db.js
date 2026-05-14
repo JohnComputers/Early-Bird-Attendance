@@ -6,15 +6,8 @@
    document, which comfortably fits a downscaled JPEG at quality 0.7.
 
    Layout (per signed-in user, isolated by security rules):
-     users/{uid}/rooms/{roomId}        → name, chairs, imageUrl, ...
      users/{uid}/people/{personId}     → name, descriptors, thumbUrl, ...
-     users/{uid}/sessions/{sessionId}  → roomId, date, attendees, imageUrl, ...
-
-   Coordinate convention:
-     - chairs:     { x, y }       in 0..1 normalized (image-relative)
-     - box (att.): { x,y,w,h }    in 0..1 normalized (image-relative)
-   This lets the room and attendance photos have different
-   resolutions without alignment breaking.
+     users/{uid}/sessions/{sessionId}  → date, label, attendees, imageUrl
 ============================================================ */
 
 const DB = (() => {
@@ -22,7 +15,7 @@ const DB = (() => {
   const fs = () => firebase.firestore();
 
   function uid() { return Auth.requireUid(); }
-  function col(name) { return fs().collection(`users/${uid()}/${name}`); }
+  function col(name)        { return fs().collection(`users/${uid()}/${name}`); }
   function docRef(coll, id) { return fs().doc(`users/${uid()}/${coll}/${id}`); }
 
   // Firestore disallows directly nested arrays; wrap each descriptor.
@@ -73,54 +66,9 @@ const DB = (() => {
     return c.toDataURL('image/jpeg', quality);
   }
 
-  // No-op kept so app.js can `await DB.open()` exactly as before.
   function open() { return Promise.resolve(); }
 
-  // -------- ROOMS --------
-  async function addRoom(room) {
-    let imageUrl = room.imageUrl || null;
-    if (room.imageBlob) {
-      imageUrl = await blobToCompressedDataUrl(room.imageBlob, { maxDim: 1280, quality: 0.7 });
-    }
-    const ref = col('rooms').doc();
-    await ref.set({
-      name: room.name,
-      chairs: room.chairs || [],
-      imageUrl,
-      createdAt: room.createdAt || new Date().toISOString(),
-    });
-    return ref.id;
-  }
-
-  async function getRooms() {
-    const snap = await col('rooms').orderBy('createdAt', 'desc').get();
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  }
-
-  async function getRoom(id) {
-    const snap = await docRef('rooms', id).get();
-    return snap.exists ? { id: snap.id, ...snap.data() } : null;
-  }
-
-  async function updateRoom(room) {
-    let imageUrl = room.imageUrl || null;
-    if (room.imageBlob) {
-      imageUrl = await blobToCompressedDataUrl(room.imageBlob, { maxDim: 1280, quality: 0.7 });
-    }
-    await docRef('rooms', room.id).set({
-      name: room.name,
-      chairs: room.chairs || [],
-      imageUrl,
-      createdAt: room.createdAt || new Date().toISOString(),
-    });
-  }
-
-  async function deleteRoom(id) {
-    await docRef('rooms', id).delete();
-  }
-
   // -------- PEOPLE --------
-  // thumbUrl is a small (~200px) JPEG data URL produced by ML.cropFace.
   async function addPerson(person) {
     const ref = col('people').doc();
     await ref.set({
@@ -176,13 +124,11 @@ const DB = (() => {
     }
     const ref = col('sessions').doc();
     await ref.set({
-      roomId:    session.roomId,
-      roomName:  session.roomName,
       date:      session.date || new Date().toISOString(),
+      label:     session.label || '',
       imageUrl,
       attendees: session.attendees || [],
       faceCount: session.faceCount || 0,
-      seatCount: session.seatCount || 0,
     });
     return ref.id;
   }
@@ -203,23 +149,20 @@ const DB = (() => {
 
   // -------- COUNTS --------
   async function counts() {
-    const [r, p, s] = await Promise.all([
-      col('rooms').get(), col('people').get(), col('sessions').get(),
+    const [p, s] = await Promise.all([
+      col('people').get(), col('sessions').get(),
     ]);
-    return { rooms: r.size, people: p.size, sessions: s.size };
+    return { people: p.size, sessions: s.size };
   }
 
   // -------- EXPORT --------
   async function exportAll() {
-    const [rooms, people, sessions] = await Promise.all([
-      getRooms(), getPeople(), getSessions(),
-    ]);
+    const [people, sessions] = await Promise.all([getPeople(), getSessions()]);
     return {
-      version: 3,
+      version: 4,
       backend: 'firestore-only',
       exportedAt: new Date().toISOString(),
       uid: uid(),
-      rooms,
       people: people.map(p => ({
         ...p,
         descriptors: (p.descriptors || []).map(d => Array.from(d)),
@@ -230,7 +173,8 @@ const DB = (() => {
 
   // -------- RESET --------
   async function reset() {
-    for (const name of ['rooms', 'people', 'sessions']) {
+    // Also wipe any legacy "rooms" collection from previous versions.
+    for (const name of ['people', 'sessions', 'rooms']) {
       const snap = await col(name).get();
       const docs = snap.docs;
       while (docs.length) {
@@ -244,7 +188,6 @@ const DB = (() => {
 
   return {
     open, counts, reset, exportAll,
-    addRoom, getRooms, getRoom, updateRoom, deleteRoom,
     addPerson, getPeople, getPerson, updatePerson, deletePerson,
     addSession, getSessions, getSession, deleteSession,
   };
