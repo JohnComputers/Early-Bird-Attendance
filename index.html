@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ATTENDANCE.SYS — Visual Attendance Tracker</title>
-  <meta name="description" content="Face-recognition attendance. Upload a photo, get who's there." />
+  <meta name="description" content="Face-recognition attendance. Click on each face to mark them present." />
   <link rel="stylesheet" href="style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -17,7 +17,6 @@
   <div id="boot" class="boot">
     <div class="boot-grid" aria-hidden="true"></div>
 
-    <!-- Loading mode -->
     <div class="boot-content" id="bootLoading">
       <div class="boot-row">
         <span class="boot-mark"></span>
@@ -29,7 +28,6 @@
       <div class="boot-hint" id="bootHint">First load downloads ~6&nbsp;MB of vision models. They cache after this.</div>
     </div>
 
-    <!-- Sign-in mode -->
     <div class="boot-content boot-signin hidden" id="bootSignIn">
       <div class="boot-row">
         <span class="boot-mark"></span>
@@ -87,8 +85,8 @@
       <div class="panel">
         <header class="panel-head">
           <div>
-            <h2>ATTEND <span class="head-dim">— Take Attendance</span></h2>
-            <p>Upload a photo. The system detects every face, matches against your roster, and prompts you to identify anyone new.</p>
+            <h2>ATTEND <span class="head-dim">— Click each face to mark present</span></h2>
+            <p>Upload a photo, then <em>click on each person's face</em>. Each click runs focused face recognition on that spot. Click a marker again to remove it.</p>
           </div>
           <div class="head-tools">
             <input type="text" id="sessionLabel" class="select" placeholder="Session label (optional)" />
@@ -104,18 +102,19 @@
             <div class="canvas-empty" id="attEmpty">
               <div class="canvas-empty-mark"></div>
               <h3>READY</h3>
-              <p>Drop a photo here, or click <strong>UPLOAD PHOTO</strong> above.</p>
+              <p>Drop a photo here, or click <strong>UPLOAD PHOTO</strong> above. Then click on each person's face.</p>
             </div>
             <canvas id="attCanvas" class="hidden"></canvas>
           </div>
 
           <aside class="side">
             <div class="card">
-              <div class="card-head"><h3>RESULTS</h3></div>
+              <div class="card-head"><h3>MARKERS</h3></div>
               <div class="card-body">
-                <div class="kv"><span>Faces detected</span><strong id="facesCount">—</strong></div>
+                <div class="kv"><span>Placed</span><strong id="markerCount">—</strong></div>
                 <div class="kv"><span>Recognized</span><strong id="recCount">—</strong></div>
                 <div class="kv"><span>New / Unknown</span><strong id="unkCount">—</strong></div>
+                <div class="kv"><span>Failed detection</span><strong id="failCount">—</strong></div>
               </div>
             </div>
 
@@ -127,8 +126,13 @@
             <div class="card">
               <div class="card-head"><h3>ACTIONS</h3></div>
               <div class="card-body stack">
+                <button class="btn ghost block" id="autoDetectBtn" disabled>
+                  AUTO-DETECT FACES
+                  <small>tries to add markers automatically</small>
+                </button>
+                <button class="btn ghost block" id="clearMarkersBtn" disabled>CLEAR ALL MARKERS</button>
+                <button class="btn ghost block" id="reIdentifyBtn" hidden>IDENTIFY UNKNOWNS</button>
                 <button class="btn primary block" id="saveSessionBtn" disabled>SAVE ATTENDANCE</button>
-                <button class="btn ghost block" id="reIdentifyBtn" disabled hidden>IDENTIFY UNKNOWNS</button>
                 <button class="btn ghost block" id="discardSessionBtn" disabled>DISCARD</button>
               </div>
             </div>
@@ -239,7 +243,7 @@
   <!-- ========= TOAST ========= -->
   <div id="toast" class="toast hidden"></div>
 
-  <!-- Firebase compat SDKs (no Storage — Firestore-only) -->
+  <!-- Firebase compat SDKs (Firestore-only — no Storage) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>

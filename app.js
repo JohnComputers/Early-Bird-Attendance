@@ -1,8 +1,12 @@
 /* =========================================================
-   app.js — ATTENDANCE.SYS main controller (simplified)
+   app.js — ATTENDANCE.SYS main controller (click-to-mark)
 
-   No rooms. No chair points. Just: upload a photo → detect every
-   face → match against the roster → identify unknowns → save.
+   Flow:
+     1. Upload photo
+     2. Click each person's face → marker placed, focused detection runs
+        on a region around that click, descriptor matched against roster
+     3. Identify any unknowns
+     4. Save session
 ========================================================= */
 
 const App = (() => {
@@ -17,12 +21,33 @@ const App = (() => {
     att: {
       image:     null,
       imageBlob: null,
-      faces:     [],
-      faceCrops: [],         // array of data-URL strings
-      attendees: [],
-      pending:   false,
+      markers:   [],         // see makeMarker() below
+      nextNum:   1,
     },
   };
+
+  /**
+   * Marker shape:
+   *   {
+   *     id:       'm1234abc',
+   *     num:      1,
+   *     nx, ny:   normalized 0..1 click position
+   *     state:    'pending' | 'detected' | 'failed'
+   *     face:     { box, descriptor } | null
+   *     crop:     data-URL string | null
+   *     attendee: { personId, name, isNew, distance } | null
+   *     method:   'detected' | 'fallback' | 'auto' | undefined
+   *   }
+   */
+  function makeMarker(nx, ny) {
+    return {
+      id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      num: state.att.nextNum++,
+      nx, ny,
+      state: 'pending',
+      face: null, crop: null, attendee: null,
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // BOOT
@@ -32,20 +57,14 @@ const App = (() => {
     bindSignInEvents();
 
     bootStatus('CONNECTING TO FIREBASE…');
-    try {
-      Auth.init();
-    } catch (err) {
-      return bootFail(err.message);
-    }
+    try { Auth.init(); }
+    catch (err) { return bootFail(err.message); }
     bootLog('> Firebase initialized.');
     bootProgress(8);
 
     bootStatus('CHECKING AUTH STATE…');
     const user = await Auth.waitForFirstAuthState();
-    if (!user) {
-      showSignInScreen();
-      return;
-    }
+    if (!user) { showSignInScreen(); return; }
     afterSignedIn(user);
   }
 
@@ -62,15 +81,12 @@ const App = (() => {
         bootLog('> ' + msg);
         if (pct) bootProgress(15 + pct * 0.7);
       });
-    } catch (err) {
-      return bootFail(err.message);
-    }
+    } catch (err) { return bootFail(err.message); }
     bootProgress(85);
 
     bootStatus('LOADING DATA…');
-    try {
-      await refreshAll();
-    } catch (err) {
+    try { await refreshAll(); }
+    catch (err) {
       return bootFail('Could not load data: ' + err.message +
         ' — verify your Firestore rules allow this user to read /users/{uid}.');
     }
@@ -78,7 +94,7 @@ const App = (() => {
     bootLog('> All systems online.');
 
     setTimeout(hideBoot, 450);
-    setStatus('Ready. Upload a photo to take attendance.', 'ok');
+    setStatus('Ready. Upload a photo, then click on each person\'s face.', 'ok');
     setModelStatus('MODELS: loaded');
 
     Auth.onChange(u => { if (!u) location.reload(); });
@@ -130,12 +146,14 @@ const App = (() => {
   // ---------------------------------------------------------------------------
   function bindGlobalEvents() {
     document.getElementById('tabs').addEventListener('click', e => {
-      const t = e.target.closest('.tab');
-      if (!t) return;
+      const t = e.target.closest('.tab'); if (!t) return;
       switchTab(t.dataset.tab);
     });
 
     document.getElementById('attFile').addEventListener('change', onAttFile);
+    document.getElementById('attCanvas').addEventListener('click', onCanvasClick);
+    document.getElementById('autoDetectBtn').addEventListener('click', autoDetect);
+    document.getElementById('clearMarkersBtn').addEventListener('click', clearMarkers);
     document.getElementById('saveSessionBtn').addEventListener('click', saveSession);
     document.getElementById('reIdentifyBtn').addEventListener('click', reopenIdentify);
     document.getElementById('discardSessionBtn').addEventListener('click', discardSession);
@@ -169,12 +187,10 @@ const App = (() => {
     });
     dropZone.addEventListener('drop', e => {
       const file = e.dataTransfer?.files?.[0];
-      if (file && file.type.startsWith('image/')) processAttFile(file);
+      if (file && file.type.startsWith('image/')) loadAttPhoto(file);
     });
 
-    window.addEventListener('resize', () => {
-      if (state.att.image) drawAttCanvas();
-    });
+    window.addEventListener('resize', () => { if (state.att.image) drawAttCanvas(); });
   }
 
   function switchTab(name) {
@@ -203,67 +219,32 @@ const App = (() => {
   async function onAttFile(e) {
     const file = e.target.files[0];
     e.target.value = '';
-    if (file) await processAttFile(file);
+    if (file) await loadAttPhoto(file);
   }
 
-  async function processAttFile(file) {
-    setStatus('Detecting faces…', 'busy');
+  async function loadAttPhoto(file) {
+    setStatus('Loading photo…');
     try {
       const img = await fileToImage(file);
-      state.att.image = img;
-      state.att.imageBlob = file;
+      state.att = {
+        image: img, imageBlob: file,
+        markers: [], nextNum: 1,
+      };
 
       document.getElementById('attEmpty').classList.add('hidden');
       const c = document.getElementById('attCanvas');
       c.classList.remove('hidden');
-
-      c.width  = img.naturalWidth;
-      c.height = img.naturalHeight;
-      fitCanvas(c);
-      c.getContext('2d').drawImage(img, 0, 0);
-
-      const faces = await ML.detectFaces(img);
-      state.att.faces = faces;
-
-      state.att.faceCrops = await Promise.all(
-        faces.map(f => ML.cropFace(img, f.box))
-      );
-
-      const attendees = faces.map((f, i) => {
-        const m = ML.matchFace(f.descriptor, state.people);
-        return {
-          faceIdx:   i,
-          personId:  m ? m.personId : null,
-          name:      m ? m.name : null,
-          isNew:     !m,
-          distance:  m ? m.distance : null,
-        };
-      });
-
-      state.att.attendees = attendees;
-      state.att.pending = true;
-
       drawAttCanvas();
-      updateAttResults();
-      renderAttendeesList();
+      updateAttUI();
 
-      const unknowns = attendees.filter(a => a.isNew);
-      if (unknowns.length > 0) openIdentifyModal(unknowns);
-
-      document.getElementById('saveSessionBtn').disabled = false;
+      document.getElementById('autoDetectBtn').disabled = false;
       document.getElementById('discardSessionBtn').disabled = false;
-      updateReIdentifyBtn();
 
-      const n = faces.length;
-      if (n === 0) {
-        setStatus('No faces detected. Try a clearer photo.', 'error');
-      } else {
-        setStatus(`Detected ${n} face${n === 1 ? '' : 's'}.`, 'ok');
-      }
+      setStatus('Click on each person\'s face to mark them present.', 'ok');
     } catch (err) {
       console.error(err);
-      toast('Detection failed: ' + err.message, true);
-      setStatus('Detection failed.', 'error');
+      toast('Failed to load image: ' + err.message, true);
+      setStatus('Failed.', 'error');
     }
   }
 
@@ -285,87 +266,308 @@ const App = (() => {
     const c = document.getElementById('attCanvas');
     const img = state.att.image;
     if (!img) return;
-    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    c.width  = img.naturalWidth;
+    c.height = img.naturalHeight;
     fitCanvas(c);
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0);
+    state.att.markers.forEach(m => drawMarker(ctx, m, c));
+  }
 
-    state.att.attendees.forEach(att => {
-      const face = state.att.faces[att.faceIdx];
-      const { x, y, width, height } = face.box;
-      const isUnk = att.isNew;
+  function drawMarker(ctx, m, c) {
+    const fontSize = Math.max(14, c.width * 0.018);
+    ctx.save();
+
+    if (m.state === 'detected' && m.face) {
+      // Face box + name label
+      const { x, y, width, height } = m.face.box;
+      const isUnk  = m.attendee.isNew;
+      const isAnon = m.attendee.name === 'Anonymous';
+      const color = isUnk ? '#ffb547' : (isAnon ? '#8a948a' : '#c8ff00');
+
       ctx.lineWidth = Math.max(2, c.width * 0.0025);
-      ctx.strokeStyle = isUnk ? '#ffb547' : '#c8ff00';
-      ctx.fillStyle   = isUnk ? '#ffb547' : '#c8ff00';
+      ctx.strokeStyle = color;
+      ctx.fillStyle   = color;
       ctx.strokeRect(x, y, width, height);
-      const label = att.name || (isUnk ? 'NEW?' : '?');
-      const fontSize = Math.max(14, c.width * 0.018);
+
+      const label = `${m.num} · ${m.attendee.name || (isUnk ? 'NEW?' : '?')}`;
       ctx.font = `700 ${fontSize}px JetBrains Mono, monospace`;
-      const padding = fontSize * 0.4;
-      const tw = ctx.measureText(label).width + padding * 2;
-      ctx.fillRect(x, y - fontSize - padding, tw, fontSize + padding);
+      const pad = fontSize * 0.4;
+      const tw  = ctx.measureText(label).width + pad * 2;
+      ctx.fillRect(x, y - fontSize - pad, tw, fontSize + pad);
       ctx.fillStyle = '#0a0d0a';
       ctx.textBaseline = 'middle';
-      ctx.fillText(label, x + padding, y - (fontSize + padding) / 2);
-    });
-  }
+      ctx.fillText(label, x + pad, y - (fontSize + pad) / 2);
 
-  function updateAttResults() {
-    const a = state.att.attendees;
-    document.getElementById('facesCount').textContent = state.att.faces.length;
-    document.getElementById('recCount').textContent   = a.filter(x => !x.isNew && x.personId).length;
-    document.getElementById('unkCount').textContent   = a.filter(x => x.isNew).length;
-  }
+    } else if (m.state === 'pending') {
+      // Animated dashed circle at click point
+      const px = m.nx * c.width, py = m.ny * c.height;
+      const r  = Math.max(22, Math.min(c.width, c.height) * 0.022);
+      const t  = Date.now() / 400;
+      const phase = (Math.sin(t) + 1) / 2;
+      ctx.lineWidth = Math.max(2, r * 0.16);
+      ctx.strokeStyle = '#6ad6ff';
+      ctx.fillStyle = `rgba(106,214,255,${0.15 + 0.15 * phase})`;
+      ctx.setLineDash([r * 0.4, r * 0.3]);
+      ctx.lineDashOffset = -t * 4;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // number
+      ctx.fillStyle = '#6ad6ff';
+      ctx.font = `700 ${r * 0.7}px JetBrains Mono, monospace`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(m.num), px, py);
 
-  function updateReIdentifyBtn() {
-    const unknowns = state.att.attendees.filter(a => a.isNew).length;
-    const btn = document.getElementById('reIdentifyBtn');
-    btn.hidden = unknowns === 0;
-    btn.disabled = unknowns === 0;
-    if (unknowns > 0) {
-      btn.textContent = `IDENTIFY ${unknowns} UNKNOWN${unknowns === 1 ? '' : 'S'}`;
+    } else if (m.state === 'failed') {
+      // Red X at click point
+      const px = m.nx * c.width, py = m.ny * c.height;
+      const r  = Math.max(22, Math.min(c.width, c.height) * 0.022);
+      ctx.lineWidth = Math.max(3, r * 0.18);
+      ctx.strokeStyle = '#ff5959';
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(px - r * 0.5, py - r * 0.5); ctx.lineTo(px + r * 0.5, py + r * 0.5);
+      ctx.moveTo(px + r * 0.5, py - r * 0.5); ctx.lineTo(px - r * 0.5, py + r * 0.5);
+      ctx.stroke();
+      // small number badge
+      ctx.fillStyle = '#ff5959';
+      ctx.font = `700 ${fontSize * 0.7}px JetBrains Mono, monospace`;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText(`#${m.num}`, px + r + 4, py - r);
     }
+    ctx.restore();
+  }
+
+  // Animation loop while any marker is pending
+  let rafId = null;
+  function ensureAnimating() {
+    if (rafId) return;
+    const tick = () => {
+      const c = document.getElementById('attCanvas');
+      if (!c || c.classList.contains('hidden')) { rafId = null; return; }
+      const stillPending = state.att.markers.some(m => m.state === 'pending');
+      drawAttCanvas();
+      if (stillPending) rafId = requestAnimationFrame(tick);
+      else rafId = null;
+    };
+    rafId = requestAnimationFrame(tick);
+  }
+
+  // ----------- CLICK ON CANVAS -----------
+  async function onCanvasClick(e) {
+    const c = e.currentTarget;
+    if (c.classList.contains('hidden') || !state.att.image) return;
+
+    const rect = c.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (c.width  / rect.width);
+    const py = (e.clientY - rect.top)  * (c.height / rect.height);
+    const nx = px / c.width;
+    const ny = py / c.height;
+
+    // Hit test: if the click landed inside an existing detected face box, or near
+    // a pending/failed dot, remove that marker instead of adding a new one.
+    const hitRadius = Math.max(28, c.width * 0.025);
+    const hitIdx = state.att.markers.findIndex(m => {
+      if (m.state === 'detected' && m.face) {
+        const b = m.face.box;
+        return px >= b.x && px <= b.x + b.width && py >= b.y && py <= b.y + b.height;
+      }
+      const mpx = m.nx * c.width, mpy = m.ny * c.height;
+      return Math.hypot(mpx - px, mpy - py) < hitRadius;
+    });
+    if (hitIdx >= 0) {
+      state.att.markers.splice(hitIdx, 1);
+      drawAttCanvas();
+      updateAttUI();
+      return;
+    }
+
+    // New marker
+    const marker = makeMarker(nx, ny);
+    state.att.markers.push(marker);
+    drawAttCanvas();
+    updateAttUI();
+    ensureAnimating();
+
+    await processMarker(marker);
+  }
+
+  async function processMarker(marker) {
+    try {
+      const result = await ML.detectFaceNearPoint(state.att.image, marker.nx, marker.ny);
+      const live = state.att.markers.find(m => m.id === marker.id);
+      if (!live) return; // user removed it while we were thinking
+
+      if (!result) {
+        live.state = 'failed';
+      } else {
+        live.face = { box: result.box, descriptor: result.descriptor };
+        live.method = result.method;
+        live.crop = await ML.cropFace(state.att.image, result.box);
+        const match = ML.matchFace(result.descriptor, state.people);
+        live.attendee = {
+          personId: match ? match.personId : null,
+          name:     match ? match.name     : null,
+          isNew:    !match,
+          distance: match ? match.distance : null,
+        };
+        live.state = 'detected';
+      }
+    } catch (err) {
+      console.error(err);
+      const live = state.att.markers.find(m => m.id === marker.id);
+      if (live) live.state = 'failed';
+    }
+    drawAttCanvas();
+    updateAttUI();
+  }
+
+  function updateAttUI() {
+    const ms = state.att.markers;
+    document.getElementById('markerCount').textContent = ms.length || '—';
+    document.getElementById('recCount').textContent =
+      ms.filter(m => m.state === 'detected' && !m.attendee.isNew && m.attendee.personId).length || '—';
+    document.getElementById('unkCount').textContent =
+      ms.filter(m => m.state === 'detected' && m.attendee.isNew).length || '—';
+    document.getElementById('failCount').textContent =
+      ms.filter(m => m.state === 'failed').length || '—';
+
+    document.getElementById('clearMarkersBtn').disabled = ms.length === 0;
+    document.getElementById('saveSessionBtn').disabled  =
+      ms.length === 0 || ms.some(m => m.state === 'pending');
+
+    const unknowns = ms.filter(m => m.state === 'detected' && m.attendee.isNew).length;
+    const reBtn = document.getElementById('reIdentifyBtn');
+    reBtn.hidden = unknowns === 0;
+    if (unknowns > 0) reBtn.textContent = `IDENTIFY ${unknowns} UNKNOWN${unknowns === 1 ? '' : 'S'}`;
+
+    renderAttendeesList();
   }
 
   function renderAttendeesList() {
+    const ms = state.att.markers;
+    document.getElementById('attendeesCard').hidden = ms.length === 0;
     const root = document.getElementById('attendeesList');
-    document.getElementById('attendeesCard').hidden = state.att.attendees.length === 0;
-    if (state.att.attendees.length === 0) { root.innerHTML = ''; return; }
+    if (ms.length === 0) { root.innerHTML = ''; return; }
+
     root.innerHTML = '<div class="attendees"></div>';
     const list = root.querySelector('.attendees');
 
-    // Group: knowns first (alphabetical), then unknowns
-    const sorted = state.att.attendees.slice().sort((a, b) => {
-      if (a.isNew !== b.isNew) return a.isNew ? 1 : -1;
-      return (a.name || '').localeCompare(b.name || '');
+    // Sort: detected/known → detected/unknown → pending → failed; alphabetical within each
+    const order = m =>
+      (m.state === 'detected' && m.attendee && !m.attendee.isNew) ? 0 :
+      (m.state === 'detected' && m.attendee && m.attendee.isNew)  ? 1 :
+      (m.state === 'pending') ? 2 : 3;
+    const sorted = ms.slice().sort((a, b) => {
+      const oa = order(a), ob = order(b);
+      if (oa !== ob) return oa - ob;
+      return (a.attendee?.name || '').localeCompare(b.attendee?.name || '');
     });
 
-    sorted.forEach(att => {
-      const url = state.att.faceCrops[att.faceIdx];
+    sorted.forEach(m => {
       const div = document.createElement('div');
-      div.className = 'attendee' + (att.isNew ? ' unk' : '');
+      let cls = 'attendee';
+      let name, sub, badge, badgeCls;
+
+      if (m.state === 'pending') {
+        cls += ' pending'; name = 'Detecting…'; sub = `Marker #${m.num}`;
+        badge = 'PENDING'; badgeCls = 'pending';
+      } else if (m.state === 'failed') {
+        cls += ' failed'; name = 'No face here'; sub = `Marker #${m.num} · click to remove and try again`;
+        badge = 'FAILED'; badgeCls = 'failed';
+      } else if (m.attendee.isNew) {
+        cls += ' unk'; name = 'Unknown'; sub = `Marker #${m.num} · click "IDENTIFY UNKNOWNS"`;
+        badge = 'NEW'; badgeCls = 'new';
+      } else {
+        name = m.attendee.name;
+        sub  = `Marker #${m.num}${m.attendee.distance ? ' · d=' + m.attendee.distance.toFixed(2) : ''}${m.method === 'fallback' ? ' · low conf' : ''}`;
+        badge = 'KNOWN'; badgeCls = 'ok';
+      }
+
+      div.className = cls;
+      const thumb = m.crop
+        ? `<img src="${m.crop}" alt="" />`
+        : `<div class="placeholder-thumb">${m.num}</div>`;
       div.innerHTML = `
-        <img src="${url}" alt="" />
+        ${thumb}
         <div class="info">
-          <b>${escapeHtml(att.name || 'Unknown')}</b>
-          <small>${att.distance ? 'd=' + att.distance.toFixed(2) : 'unidentified'}</small>
+          <b>${escapeHtml(name)}</b>
+          <small>${escapeHtml(sub)}</small>
         </div>
-        <span class="badge ${att.isNew ? 'new' : 'ok'}">${att.isNew ? 'NEW' : 'KNOWN'}</span>`;
+        <span class="badge ${badgeCls}">${badge}</span>`;
       list.appendChild(div);
     });
   }
 
+  function clearMarkers() {
+    if (state.att.markers.length === 0) return;
+    if (!confirm('Remove all markers?')) return;
+    state.att.markers = [];
+    state.att.nextNum = 1;
+    drawAttCanvas();
+    updateAttUI();
+  }
+
+  async function autoDetect() {
+    if (!state.att.image) return;
+    const btn = document.getElementById('autoDetectBtn');
+    btn.disabled = true;
+    setStatus('Scanning whole photo…', 'busy');
+    try {
+      const faces = await ML.detectFaces(state.att.image);
+      const W = state.att.image.naturalWidth, H = state.att.image.naturalHeight;
+      for (const f of faces) {
+        const cx = (f.box.x + f.box.width  / 2) / W;
+        const cy = (f.box.y + f.box.height / 2) / H;
+        // Skip if there's already a marker within hit radius
+        const exists = state.att.markers.some(m =>
+          Math.hypot((m.nx - cx) * W, (m.ny - cy) * H) < Math.max(28, W * 0.025));
+        if (exists) continue;
+
+        const m = makeMarker(cx, cy);
+        m.state = 'detected';
+        m.face = { box: f.box, descriptor: f.descriptor };
+        m.method = 'auto';
+        m.crop = await ML.cropFace(state.att.image, f.box);
+        const match = ML.matchFace(f.descriptor, state.people);
+        m.attendee = {
+          personId: match ? match.personId : null,
+          name:     match ? match.name     : null,
+          isNew:    !match,
+          distance: match ? match.distance : null,
+        };
+        state.att.markers.push(m);
+      }
+      drawAttCanvas();
+      updateAttUI();
+      setStatus(faces.length === 0
+        ? 'Auto-detect found no faces — try clicking manually.'
+        : `Auto-detect added ${faces.length} marker${faces.length === 1 ? '' : 's'}.`,
+        'ok');
+    } catch (err) {
+      console.error(err);
+      toast('Auto-detect failed: ' + err.message, true);
+      setStatus('Error.', 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // ----- IDENTIFY MODAL -----
-  function openIdentifyModal(unknowns) {
+  function openIdentifyModal(markers) {
     const root = document.getElementById('identifyList');
     root.innerHTML = '';
-    unknowns.forEach(att => {
-      const url = state.att.faceCrops[att.faceIdx];
+    markers.forEach(m => {
       const div = document.createElement('div');
       div.className = 'identify-item';
-      div.dataset.faceIdx = att.faceIdx;
+      div.dataset.markerId = m.id;
       div.innerHTML = `
-        <img src="${url}" alt="" />
+        <img src="${m.crop}" alt="" />
         <div class="controls">
           <div class="row">
             <select class="select existing-sel">
@@ -384,9 +586,8 @@ const App = (() => {
   }
 
   function reopenIdentify() {
-    const unknowns = state.att.attendees.filter(a => a.isNew);
-    if (unknowns.length === 0) return;
-    openIdentifyModal(unknowns);
+    const unknowns = state.att.markers.filter(m => m.state === 'detected' && m.attendee.isNew);
+    if (unknowns.length > 0) openIdentifyModal(unknowns);
   }
 
   async function confirmIdentify() {
@@ -394,53 +595,49 @@ const App = (() => {
     setStatus('Saving identifications…', 'busy');
     try {
       for (const item of items) {
-        const faceIdx = parseInt(item.dataset.faceIdx, 10);
+        const markerId = item.dataset.markerId;
         const sel = item.querySelector('.existing-sel').value;
         const newName = item.querySelector('.new-name').value.trim();
-        const att = state.att.attendees.find(a => a.faceIdx === faceIdx);
-        if (!att) continue;
+        const m = state.att.markers.find(x => x.id === markerId);
+        if (!m || !m.face) continue;
 
         if (sel === '__skip' && !newName) {
-          att.name = 'Anonymous';
-          att.personId = null;
-          att.isNew = false;
+          m.attendee.name = 'Anonymous';
+          m.attendee.personId = null;
+          m.attendee.isNew = false;
           continue;
         }
         if (sel && sel !== '__skip') {
-          // Match this face to existing person — add as a new training sample.
+          // Add face as a sample to existing person
           const personId = sel;
           const person = state.people.find(p => p.id === personId);
           if (person) {
-            person.descriptors = (person.descriptors || []).concat([state.att.faces[faceIdx].descriptor]);
+            person.descriptors = (person.descriptors || []).concat([m.face.descriptor]);
             await DB.updatePerson(person);
-            att.personId = person.id;
-            att.name = person.name;
-            att.isNew = false;
+            m.attendee.personId = person.id;
+            m.attendee.name = person.name;
+            m.attendee.isNew = false;
           }
           continue;
         }
         if (newName) {
-          const thumbUrl = state.att.faceCrops[faceIdx];
-          const desc     = state.att.faces[faceIdx].descriptor;
           const personId = await DB.addPerson({
             name: newName,
-            descriptors: [desc],
-            thumbUrl,
+            descriptors: [m.face.descriptor],
+            thumbUrl: m.crop,
             firstSeen: new Date().toISOString(),
             lastSeen:  new Date().toISOString(),
             encounters: 0,
           });
-          att.personId = personId;
-          att.name = newName;
-          att.isNew = false;
+          m.attendee.personId = personId;
+          m.attendee.name = newName;
+          m.attendee.isNew = false;
         }
       }
       closeIdentifyModal();
       await refreshAll();
       drawAttCanvas();
-      updateAttResults();
-      renderAttendeesList();
-      updateReIdentifyBtn();
+      updateAttUI();
       toast('Identifications saved.');
       setStatus('Ready.', 'ok');
     } catch (err) {
@@ -456,6 +653,22 @@ const App = (() => {
 
   async function saveSession() {
     if (!state.att.imageBlob) return;
+    const detected = state.att.markers.filter(m => m.state === 'detected');
+    if (detected.length === 0) {
+      toast('No detected faces to save.', true);
+      return;
+    }
+
+    const unknowns = detected.filter(m => m.attendee.isNew);
+    if (unknowns.length > 0) {
+      const proceed = confirm(`${unknowns.length} unknown face${unknowns.length === 1 ? '' : 's'} not yet identified. Save anyway (they'll be marked Anonymous)?`);
+      if (!proceed) return;
+      unknowns.forEach(m => {
+        m.attendee.name = 'Anonymous';
+        m.attendee.isNew = false;
+        m.attendee.personId = null;
+      });
+    }
 
     setStatus('Saving session…', 'busy');
     const btn = document.getElementById('saveSessionBtn');
@@ -470,24 +683,20 @@ const App = (() => {
         date: new Date().toISOString(),
         label,
         imageBlob: state.att.imageBlob,
-        attendees: state.att.attendees.map(a => {
-          const b = state.att.faces[a.faceIdx].box;
-          return {
-            personId: a.personId,
-            name:     a.name || 'Anonymous',
-            isAnonymous: !a.personId,
-            // Normalized coords so they work after Firestore downscaling
-            box: {
-              x: b.x / W, y: b.y / H,
-              width: b.width / W, height: b.height / H,
-            },
-          };
-        }),
-        faceCount: state.att.faces.length,
+        attendees: detected.map(m => ({
+          personId: m.attendee.personId,
+          name:     m.attendee.name,
+          isAnonymous: !m.attendee.personId,
+          box: {
+            x: m.face.box.x / W, y: m.face.box.y / H,
+            width: m.face.box.width / W, height: m.face.box.height / H,
+          },
+        })),
+        faceCount: detected.length,
       };
       await DB.addSession(session);
 
-      // Bump encounters/lastSeen for known attendees.
+      // Bump encounters/lastSeen for known attendees
       const presentIds = new Set(session.attendees.map(a => a.personId).filter(Boolean));
       for (const pid of presentIds) {
         const p = state.people.find(x => x.id === pid);
@@ -515,18 +724,21 @@ const App = (() => {
   function discardSession() {
     state.att = {
       image: null, imageBlob: null,
-      faces: [], faceCrops: [], attendees: [], pending: false,
+      markers: [], nextNum: 1,
     };
     document.getElementById('sessionLabel').value = '';
     document.getElementById('attCanvas').classList.add('hidden');
     document.getElementById('attEmpty').classList.remove('hidden');
     document.getElementById('attendeesCard').hidden = true;
-    document.getElementById('facesCount').textContent = '—';
-    document.getElementById('recCount').textContent   = '—';
-    document.getElementById('unkCount').textContent   = '—';
-    document.getElementById('saveSessionBtn').disabled    = true;
+    document.getElementById('markerCount').textContent = '—';
+    document.getElementById('recCount').textContent    = '—';
+    document.getElementById('unkCount').textContent    = '—';
+    document.getElementById('failCount').textContent   = '—';
+    document.getElementById('autoDetectBtn').disabled  = true;
+    document.getElementById('clearMarkersBtn').disabled = true;
+    document.getElementById('saveSessionBtn').disabled  = true;
     document.getElementById('discardSessionBtn').disabled = true;
-    document.getElementById('reIdentifyBtn').hidden       = true;
+    document.getElementById('reIdentifyBtn').hidden    = true;
   }
 
   // ===========================================================================
@@ -630,8 +842,8 @@ const App = (() => {
         <td><b>${s.faceCount || (s.attendees || []).length}</b></td>
         <td>${pills || '<span class="muted">—</span>'}</td>
         <td>
-          <button class="btn ghost" data-view="${s.id}">VIEW</button>
-          <button class="btn ghost" data-del="${s.id}">DEL</button>
+          <button class="btn ghost no-stack" data-view="${s.id}">VIEW</button>
+          <button class="btn ghost no-stack" data-del="${s.id}">DEL</button>
         </td>`;
       tr.querySelector('[data-view]').addEventListener('click', () => showSessionDetail(s.id));
       tr.querySelector('[data-del]').addEventListener('click', async () => {
@@ -703,9 +915,7 @@ const App = (() => {
       <div class="attendees">
         ${(s.attendees || []).map(a => `
           <div class="attendee${a.isAnonymous ? ' unk' : ''}">
-            <div class="info">
-              <b>${escapeHtml(a.name)}</b>
-            </div>
+            <div class="info"><b>${escapeHtml(a.name)}</b></div>
             <span class="badge ${a.isAnonymous ? 'new' : 'ok'}">${a.isAnonymous ? 'ANON' : 'ID'}</span>
           </div>`).join('')}
       </div>`;
@@ -798,9 +1008,7 @@ const App = (() => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
   function todayStamp() {

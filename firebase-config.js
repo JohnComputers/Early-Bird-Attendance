@@ -12,10 +12,10 @@
 ============================================================ */
 
 window.FIREBASE_CONFIG = {
-  apiKey: "AIzaSyDPyf7Wtb5rNwaSKFGfzHe3pCiwklnq1qs",
-  authDomain: "early-bird-attendeance.firebaseapp.com",
-  projectId: "early-bird-attendeance",
-  storageBucket: "early-bird-attendeance.firebasestorage.app",
-  messagingSenderId: "1036831010751",
-  appId: "1:1036831010751:web:efa50c32ed1a0219ea7b0a"
+  apiKey: "PASTE_API_KEY_HERE",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project",
+  storageBucket: "your-project.appspot.com",
+  messagingSenderId: "PASTE_SENDER_ID_HERE",
+  appId: "PASTE_APP_ID_HERE"
 };
